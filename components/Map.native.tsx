@@ -28,8 +28,20 @@ const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
   5: 'Fire',
 };
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import { BottomSheetModal, BottomSheetView, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 export default function Map() {
   const mapRef = useRef<MapView>(null);
@@ -38,8 +50,61 @@ export default function Map() {
   const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
-  const [isReportModalVisible, setReportModalVisible] = useState(false);
   const [selectedReport, setSelectedReport] = useState<any>(null);
+
+  // Bottom Sheet Ref & Setup
+  const bottomSheetModalRef = useRef<BottomSheetModal>(null);
+  const snapPoints = useMemo(() => ['50%', '90%'], []);
+  
+  const handlePresentModalPress = useCallback(() => {
+    bottomSheetModalRef.current?.present();
+  }, []);
+
+  const handleDismissModalPress = useCallback(() => {
+    bottomSheetModalRef.current?.dismiss();
+  }, []);
+
+  const renderBackdrop = useCallback(
+    (props: any) => (
+      <BottomSheetBackdrop
+        {...props}
+        appearsOnIndex={0}
+        disappearsOnIndex={-1}
+      />
+    ),
+    []
+  );
+
+  const handleNotificationResponse = async (
+    response: 'still_there' | 'not_there',
+    notificationId?: string
+  ) => {
+    console.log('User responded to OS notification:', response);
+
+    // Remove the tapped notification from the OS notification center.
+    if (notificationId) {
+      try {
+        await Notifications.dismissNotificationAsync(notificationId);
+      } catch (error) {
+        console.warn('Could not dismiss notification:', error);
+      }
+    }
+
+    // Here you will eventually emit a WebSocket message
+  };
+
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const actionIdentifier = response.actionIdentifier;
+      const notificationId = response.notification.request.identifier;
+
+      if (actionIdentifier === 'still_there' || actionIdentifier === 'not_there') {
+        void handleNotificationResponse(actionIdentifier, notificationId);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
 
   const fetchNearbyAlerts = async (lat: number, lon: number) => {
     try {
@@ -68,7 +133,7 @@ export default function Map() {
         latitude: location.coords.latitude,
         longitude: location.coords.longitude,
       });
-      setReportModalVisible(true);
+      handlePresentModalPress();
     } catch (error) {
       console.warn('Could not get precise location for the report', error);
       if (region) {
@@ -76,7 +141,7 @@ export default function Map() {
           latitude: region.latitude,
           longitude: region.longitude,
         });
-        setReportModalVisible(true);
+        handlePresentModalPress();
       }
     }
   };
@@ -96,7 +161,7 @@ export default function Map() {
       };
 
       setReports(prev => [...prev, newReport]);
-      setReportModalVisible(false);
+      handleDismissModalPress();
 
       try {
         const response = await fetch(`${API_BASE_URL}/alerts`, {
@@ -145,6 +210,29 @@ export default function Map() {
 
   useEffect(() => {
     (async () => {
+      // Notification permissions and setup
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalNotificationStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalNotificationStatus = status;
+      }
+
+      if (finalNotificationStatus === 'granted') {
+        await Notifications.setNotificationCategoryAsync('alert_proximity', [
+          {
+            identifier: 'not_there',
+            buttonTitle: 'Not there',
+            options: { opensAppToForeground: false },
+          },
+          {
+            identifier: 'still_there',
+            buttonTitle: 'Still there',
+            options: { opensAppToForeground: false, isDestructive: true },
+          },
+        ]);
+      }
+
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         console.log('Permission to access location was denied');
@@ -221,39 +309,60 @@ export default function Map() {
         ))}
       </MapView>
 
+      {/* Test Button for OS Notification */}
+      <TouchableOpacity 
+        style={styles.testNotificationButton} 
+        onPress={async () => {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "⚠️ Alert is close",
+              body: "Please confirm if the alert is still valid.",
+              categoryIdentifier: "alert_proximity",
+            },
+            trigger: null,
+          });
+        }}
+      >
+        <Text style={{color: 'white', fontWeight: 'bold'}}>Test OS Alert</Text>
+      </TouchableOpacity>
+
       <View style={styles.reportButtonContainer}>
         <TouchableOpacity style={styles.reportButton} onPress={handleReportPress}>
           <Text style={styles.reportButtonText}>Report</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Report Modal */}
-      <Modal
-        visible={isReportModalVisible}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setReportModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <TouchableOpacity style={styles.modalBackground} activeOpacity={1} onPress={() => setReportModalVisible(false)} />
-          <View style={styles.bottomSheet}>
-            <View style={styles.dragHandle} />
-
-            <View style={styles.gridContainer}>
-              {ALERTS.map(alert => (
-                <TouchableOpacity
-                  key={alert.id}
-                  style={styles.gridItem}
-                  onPress={() => handleCreateReport(alert.id)}
-                >
-                  <Image source={alert.icon} style={styles.gridIcon} resizeMode="contain" />
-                  <Text style={styles.gridText}>{alert.label}</Text>
-                </TouchableOpacity>
-              ))}
+      {/* Report Bottom Sheet Modal */}
+      <BottomSheetModal
+        ref={bottomSheetModalRef}
+        index={0}
+        snapPoints={snapPoints}
+        backdropComponent={renderBackdrop}
+        enableContentPanningGesture={false}
+        handleComponent={() => (
+          <View style={styles.customHandleContainer}>
+            <View style={styles.customHandleGlow}>
+              <View style={styles.customHandleBar} />
             </View>
           </View>
-        </View>
-      </Modal>
+        )}
+      >
+        <BottomSheetView style={styles.bottomSheetContentContainer}>
+          <Text style={styles.sheetTitle}>What do you want to report?</Text>
+          <View style={styles.gridContainer}>
+            {ALERTS.map(alert => (
+              <TouchableOpacity
+                key={alert.id}
+                style={styles.gridItem}
+                onPress={() => handleCreateReport(alert.id)}
+              >
+                <Image source={alert.icon} style={styles.gridIcon} resizeMode="contain" />
+                <Text style={styles.gridText}>{alert.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </BottomSheetView>
+      </BottomSheetModal>
 
       {/* Pin Details Modal */}
       <Modal
@@ -265,7 +374,6 @@ export default function Map() {
         <View style={styles.modalOverlay}>
           <TouchableOpacity style={styles.modalBackground} activeOpacity={1} onPress={() => setSelectedReport(null)} />
           <View style={styles.bottomSheetDetails}>
-            <View style={styles.dragHandle} />
             <View style={styles.detailsContainer}>
               <Image
                 source={ALERTS.find(a => a.id === selectedReport?.type)?.icon}
@@ -305,6 +413,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  testNotificationButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 40,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    zIndex: 10,
+  },
   reportButtonContainer: {
     position: 'absolute',
     bottom: 40,
@@ -335,20 +453,41 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  bottomSheet: {
-    backgroundColor: '#fff',
+  bottomSheetContentContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+  },
+  customHandleContainer: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    padding: 20,
-    minHeight: 250,
+    backgroundColor: '#fff',
   },
-  dragHandle: {
+  customHandleGlow: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: '#f5f5f5',  // Very soft grey background to act as the "glow/aura"
+    shadowColor: '#ccc',         // Subtle glow drop shadow
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  customHandleBar: {
     width: 40,
     height: 5,
-    backgroundColor: '#ccc',
+    backgroundColor: '#bbb',
     borderRadius: 3,
-    alignSelf: 'center',
+  },
+  sheetTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
     marginBottom: 20,
+    textAlign: 'center',
   },
   gridContainer: {
     flexDirection: 'row',
