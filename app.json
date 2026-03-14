@@ -11,6 +11,10 @@
     "ios": {
       "supportsTablet": true
     },
+    "notification": {
+      "icon": "./assets/alert-icons/Theft.png",
+      "color": "#ffffff"
+    },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
