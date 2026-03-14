@@ -9,6 +9,14 @@ const ALERTS = [
   { id: 'Fire', label: 'Fire', icon: require('@/assets/alert-icons/Fire.png') },
 ];
 
+const PIN_ICONS: Record<string, any> = {
+  'Bad Infrastructure': require('@/assets/pin-icons/Bad Infrastructure Pin Icon.png'),
+  'Fire': require('@/assets/pin-icons/Fire Pin Icon.png'),
+  'Harm': require('@/assets/pin-icons/Harm Pin Icon.png'),
+  'Theft': require('@/assets/pin-icons/Theft Pin Icon.png'),
+  'Dark Area': require('@/assets/pin-icons/Dark Area Pin Icon.png'),
+};
+
 const API_BASE_URL = 'http://10.108.5.101:8080/api/v1';
 const SESSION_ID = Math.random().toString(36).substring(2, 15);
 
@@ -210,10 +218,10 @@ export default function Map() {
               setSelectedReport(report);
             }}
           >
-            <View style={styles.markerContainer}>
+            <View style={{ width: 48, height: 48, justifyContent: 'center', alignItems: 'center', overflow: 'visible' }}>
               <Image
-                source={ALERTS.find(a => a.id === report.type)?.icon}
-                style={styles.markerIcon}
+                source={PIN_ICONS[report.type] || PIN_ICONS['Fire']}
+                style={{ width: 24, height: 24 }}
                 resizeMode="contain"
               />
             </View>
