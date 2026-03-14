@@ -75,16 +75,31 @@ export default function Map() {
     []
   );
 
-  const handleNotificationResponse = (response: 'still_there' | 'not_there') => {
+  const handleNotificationResponse = async (
+    response: 'still_there' | 'not_there',
+    notificationId?: string
+  ) => {
     console.log('User responded to OS notification:', response);
+
+    // Remove the tapped notification from the OS notification center.
+    if (notificationId) {
+      try {
+        await Notifications.dismissNotificationAsync(notificationId);
+      } catch (error) {
+        console.warn('Could not dismiss notification:', error);
+      }
+    }
+
     // Here you will eventually emit a WebSocket message
   };
 
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(response => {
       const actionIdentifier = response.actionIdentifier;
+      const notificationId = response.notification.request.identifier;
+
       if (actionIdentifier === 'still_there' || actionIdentifier === 'not_there') {
-        handleNotificationResponse(actionIdentifier);
+        void handleNotificationResponse(actionIdentifier, notificationId);
       }
     });
     return () => subscription.remove();
