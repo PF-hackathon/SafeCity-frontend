@@ -30,6 +30,17 @@ const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
 
 import { useEffect, useState, useRef } from 'react';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 export default function Map() {
   const mapRef = useRef<MapView>(null);
@@ -40,6 +51,21 @@ export default function Map() {
 
   const [isReportModalVisible, setReportModalVisible] = useState(false);
   const [selectedReport, setSelectedReport] = useState<any>(null);
+  const handleNotificationResponse = (response: 'still_there' | 'not_there') => {
+    console.log('User responded to OS notification:', response);
+    // Here you will eventually emit a WebSocket message
+  };
+
+  useEffect(() => {
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      const actionIdentifier = response.actionIdentifier;
+      if (actionIdentifier === 'still_there' || actionIdentifier === 'not_there') {
+        handleNotificationResponse(actionIdentifier);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
 
   const fetchNearbyAlerts = async (lat: number, lon: number) => {
     try {
@@ -145,6 +171,29 @@ export default function Map() {
 
   useEffect(() => {
     (async () => {
+      // Notification permissions and setup
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalNotificationStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalNotificationStatus = status;
+      }
+
+      if (finalNotificationStatus === 'granted') {
+        await Notifications.setNotificationCategoryAsync('alert_proximity', [
+          {
+            identifier: 'not_there',
+            buttonTitle: 'Not there',
+            options: { opensAppToForeground: false },
+          },
+          {
+            identifier: 'still_there',
+            buttonTitle: 'Still there',
+            options: { opensAppToForeground: false, isDestructive: true },
+          },
+        ]);
+      }
+
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         console.log('Permission to access location was denied');
@@ -220,6 +269,23 @@ export default function Map() {
           </Marker>
         ))}
       </MapView>
+
+      {/* Test Button for OS Notification */}
+      <TouchableOpacity 
+        style={styles.testNotificationButton} 
+        onPress={async () => {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: "⚠️ Alert is close",
+              body: "Please confirm if the alert is still valid.",
+              categoryIdentifier: "alert_proximity",
+            },
+            trigger: null,
+          });
+        }}
+      >
+        <Text style={{color: 'white', fontWeight: 'bold'}}>Test OS Alert</Text>
+      </TouchableOpacity>
 
       <View style={styles.reportButtonContainer}>
         <TouchableOpacity style={styles.reportButton} onPress={handleReportPress}>
@@ -304,6 +370,16 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  testNotificationButton: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 40,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    zIndex: 10,
   },
   reportButtonContainer: {
     position: 'absolute',
