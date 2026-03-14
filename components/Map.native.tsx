@@ -1,13 +1,32 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Modal, Image } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Modal, Image, Platform } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
-  { id: 'Bad Infrastructure', label: 'Bad Infrastructure', icon: require('@/assets/alert-icons/Bad_Infrastructure.png') },
-  { id: 'Fire', label: 'Fire', icon: require('@/assets/alert-icons/Fire.png') },
-  { id: 'Harm', label: 'Harm', icon: require('@/assets/alert-icons/Harm.png') },
-  { id: 'Dark Area', label: 'Dark Area', icon: require('@/assets/alert-icons/Dark_Area.png') },
   { id: 'Theft', label: 'Theft', icon: require('@/assets/alert-icons/Theft.png') },
+  { id: 'Harm', label: 'Harm', icon: require('@/assets/alert-icons/Harm.png') },
+  { id: 'Bad Infrastructure', label: 'Bad Infrastructure', icon: require('@/assets/alert-icons/Bad_Infrastructure.png') },
+  { id: 'Dark Area', label: 'Dark Area', icon: require('@/assets/alert-icons/Dark_Area.png') },
+  { id: 'Fire', label: 'Fire', icon: require('@/assets/alert-icons/Fire.png') },
 ];
+
+const API_BASE_URL = 'http://10.108.5.101:8080/api/v1';
+const SESSION_ID = Math.random().toString(36).substring(2, 15);
+
+const ALERT_ID_TO_TYPE_ID: Record<string, number> = {
+  'Theft': 1,
+  'Harm': 2,
+  'Bad Infrastructure': 3,
+  'Dark Area': 4,
+  'Fire': 5,
+};
+
+const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
+  1: 'Theft',
+  2: 'Harm',
+  3: 'Bad Infrastructure',
+  4: 'Dark Area',
+  5: 'Fire',
+};
 
 import { useEffect, useState, useRef } from 'react';
 import * as Location from 'expo-location';
@@ -16,11 +35,31 @@ export default function Map() {
   const mapRef = useRef<MapView>(null);
   const [region, setRegion] = useState<Region | null>(null);
 
-  const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number }[]>([]);
+  const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
   const [isReportModalVisible, setReportModalVisible] = useState(false);
   const [selectedReport, setSelectedReport] = useState<any>(null);
+
+  const fetchNearbyAlerts = async (lat: number, lon: number) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/alerts/nearby?latitude=${lat}&longitude=${lon}`);
+      if (response.ok) {
+        const data = await response.json();
+        const mappedReports = data.map((item: any) => ({
+          id: item.alertId.toString(),
+          type: TYPE_ID_TO_ALERT_ID[item.typeId] || 'Fire',
+          latitude: item.latitude,
+          longitude: item.longitude,
+          timestamp: new Date(item.timeOfReport || Date.now()).getTime(),
+          creatorSessionId: item.creatorSessionId,
+        }));
+        setReports(mappedReports);
+      }
+    } catch (error) {
+      console.error('Error fetching alerts:', error);
+    }
+  };
 
   const handleReportPress = async () => {
     try {
@@ -33,26 +72,75 @@ export default function Map() {
     } catch (error) {
       console.warn('Could not get precise location for the report', error);
       if (region) {
-         setPendingLocation({
-            latitude: region.latitude,
-            longitude: region.longitude,
-         });
-         setReportModalVisible(true);
+        setPendingLocation({
+          latitude: region.latitude,
+          longitude: region.longitude,
+        });
+        setReportModalVisible(true);
       }
     }
   };
 
-  const handleCreateReport = (type: string) => {
+  const handleCreateReport = async (type: string) => {
     if (pendingLocation) {
-      setReports(prev => [...prev, {
-        id: Math.random().toString(),
+      const typeId = ALERT_ID_TO_TYPE_ID[type] || 1;
+      const optimisticId = Math.random().toString();
+
+      const newReport = {
+        id: optimisticId,
         type,
         latitude: pendingLocation.latitude,
         longitude: pendingLocation.longitude,
         timestamp: Date.now(),
-      }]);
+        creatorSessionId: SESSION_ID,
+      };
+
+      setReports(prev => [...prev, newReport]);
+      setReportModalVisible(false);
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/alerts`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-Id': SESSION_ID,
+          },
+          body: JSON.stringify({
+            typeId,
+            latitude: pendingLocation.latitude,
+            longitude: pendingLocation.longitude,
+          }),
+        });
+
+        if (response.ok) {
+          const createdAlert = await response.json();
+          setReports(prev => prev.map(r => r.id === optimisticId ? { ...r, id: createdAlert.alertId.toString() } : r));
+        } else {
+          console.error('Failed to create alert', await response.text());
+        }
+      } catch (error) {
+        console.error('Error creating report:', error);
+      }
     }
-    setReportModalVisible(false);
+  };
+
+  const handleDeleteReport = async (id: string) => {
+    setReports(prev => prev.filter(r => r.id !== id));
+    setSelectedReport(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/alerts/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'X-Session-Id': SESSION_ID,
+        },
+      });
+      if (!response.ok) {
+        console.error('Failed to delete report on server', await response.text());
+      }
+    } catch (error) {
+      console.error('Error deleting report:', error);
+    }
   };
 
   useEffect(() => {
@@ -66,6 +154,7 @@ export default function Map() {
           latitudeDelta: 0.0922,
           longitudeDelta: 0.0421,
         });
+        fetchNearbyAlerts(42.6977, 23.3219);
         return;
       }
 
@@ -77,6 +166,7 @@ export default function Map() {
           latitudeDelta: 0.005,
           longitudeDelta: 0.005,
         });
+        fetchNearbyAlerts(location.coords.latitude, location.coords.longitude);
       } catch (error) {
         console.warn('Error fetching location:', error);
         // Fallback to Sofia if an error occurs but permissions were granted
@@ -86,6 +176,7 @@ export default function Map() {
           latitudeDelta: 0.0922,
           longitudeDelta: 0.0421,
         });
+        fetchNearbyAlerts(42.6977, 23.3219);
       }
     })();
   }, []);
@@ -108,6 +199,7 @@ export default function Map() {
         showsUserLocation
         showsMyLocationButton
         followsUserLocation={true}
+        onRegionChangeComplete={(r) => fetchNearbyAlerts(r.latitude, r.longitude)}
       >
         {reports.map((report) => (
           <Marker
@@ -119,9 +211,9 @@ export default function Map() {
             }}
           >
             <View style={styles.markerContainer}>
-              <Image 
-                source={ALERTS.find(a => a.id === report.type)?.icon} 
-                style={styles.markerIcon} 
+              <Image
+                source={ALERTS.find(a => a.id === report.type)?.icon}
+                style={styles.markerIcon}
                 resizeMode="contain"
               />
             </View>
@@ -146,12 +238,12 @@ export default function Map() {
           <TouchableOpacity style={styles.modalBackground} activeOpacity={1} onPress={() => setReportModalVisible(false)} />
           <View style={styles.bottomSheet}>
             <View style={styles.dragHandle} />
-            
+
             <View style={styles.gridContainer}>
               {ALERTS.map(alert => (
-                <TouchableOpacity 
-                  key={alert.id} 
-                  style={styles.gridItem} 
+                <TouchableOpacity
+                  key={alert.id}
+                  style={styles.gridItem}
                   onPress={() => handleCreateReport(alert.id)}
                 >
                   <Image source={alert.icon} style={styles.gridIcon} resizeMode="contain" />
@@ -175,18 +267,23 @@ export default function Map() {
           <View style={styles.bottomSheetDetails}>
             <View style={styles.dragHandle} />
             <View style={styles.detailsContainer}>
-              <Image 
-                source={ALERTS.find(a => a.id === selectedReport?.type)?.icon} 
-                style={styles.detailsIcon} 
+              <Image
+                source={ALERTS.find(a => a.id === selectedReport?.type)?.icon}
+                style={styles.detailsIcon}
                 resizeMode="contain"
               />
               <View style={styles.detailsTextContainer}>
-                 <Text style={styles.detailsLabel}>
-                   {ALERTS.find(a => a.id === selectedReport?.type)?.label}
-                 </Text>
-                 <Text style={styles.detailsTime}>
-                   {selectedReport ? new Date(selectedReport.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                 </Text>
+                <Text style={styles.detailsLabel}>
+                  {ALERTS.find(a => a.id === selectedReport?.type)?.label}
+                </Text>
+                <Text style={styles.detailsTime}>
+                  {selectedReport ? new Date(selectedReport.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                </Text>
+                {selectedReport?.creatorSessionId === SESSION_ID && (
+                  <TouchableOpacity style={styles.deleteButton} onPress={() => handleDeleteReport(selectedReport.id)}>
+                    <Text style={styles.deleteButtonText}>Delete</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           </View>
@@ -313,5 +410,17 @@ const styles = StyleSheet.create({
   detailsTime: {
     fontSize: 16,
     color: '#666',
+  },
+  deleteButton: {
+    backgroundColor: '#ff4444',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 10,
+    alignSelf: 'flex-start'
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontWeight: 'bold'
   },
 });
