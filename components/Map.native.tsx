@@ -700,9 +700,9 @@ export default function Map() {
         provider={PROVIDER_GOOGLE}
         style={styles.map}
         initialRegion={region}
-        showsUserLocation
+        showsUserLocation={true}
         showsMyLocationButton={false}
-        showsCompass={true}
+        showsCompass={false}
         mapPadding={{ top: 60, right: 10, bottom: 0, left: 0 }}
         followsUserLocation={false}
         toolbarEnabled={false}
