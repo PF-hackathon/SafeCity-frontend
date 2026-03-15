@@ -1,14 +1,15 @@
 {
   "expo": {
-    "name": "antigravity",
-    "slug": "antigravity",
+    "name": "SafeCity",
+    "slug": "SafeCity",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "antigravity",
+    "scheme": "SafeCity",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "bundleIdentifier": "com.pf.safecity",
       "supportsTablet": true
     },
     "notification": {
@@ -16,6 +17,7 @@
       "color": "#ffffff"
     },
     "android": {
+      "package": "com.pf.safecity",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
