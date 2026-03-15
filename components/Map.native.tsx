@@ -1,4 +1,4 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Modal, Image, Platform } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
@@ -40,6 +40,7 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { BottomSheetModal, BottomSheetView, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 Notifications.setNotificationHandler({
@@ -53,12 +54,20 @@ Notifications.setNotificationHandler({
 });
 
 export default function Map() {
+  const { width: windowWidth } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
+  const followSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
+  const [isFollowingUser, setIsFollowingUser] = useState(false);
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false);
+  const [showFloatingButtons, setShowFloatingButtons] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchWidthAnim = useRef(new Animated.Value(0)).current;
+  const searchInputRef = useRef<TextInput>(null);
 
   const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-  const { status: wsStatus, sendLocation, initialAlerts, newAlert } = useWebSocket(SESSION_ID);
+  const { sendLocation, initialAlerts, newAlert } = useWebSocket(SESSION_ID);
   const lastLocationPushRef = useRef<{ latitude: number; longitude: number; ts: number } | null>(null);
 
   const [selectedReport, setSelectedReport] = useState<any>(null);
@@ -82,7 +91,9 @@ export default function Map() {
 
   // Bottom Sheet Ref & Setup
   const bottomSheetModalRef = useRef<BottomSheetModal>(null);
+  const detailsBottomSheetModalRef = useRef<BottomSheetModal>(null);
   const snapPoints = useMemo(() => ['50%', '90%'], []);
+  const detailsSnapPoints = snapPoints;
   
   const handlePresentModalPress = useCallback(() => {
     bottomSheetModalRef.current?.present();
@@ -92,12 +103,23 @@ export default function Map() {
     bottomSheetModalRef.current?.dismiss();
   }, []);
 
+  const handlePresentDetailsModalPress = useCallback((report: any) => {
+    setSelectedReport(report);
+    detailsBottomSheetModalRef.current?.present();
+  }, []);
+
+  const handleDismissDetailsModalPress = useCallback(() => {
+    detailsBottomSheetModalRef.current?.dismiss();
+    setSelectedReport(null);
+  }, []);
+
   const renderBackdrop = useCallback(
     (props: any) => (
       <BottomSheetBackdrop
         {...props}
         appearsOnIndex={0}
         disappearsOnIndex={-1}
+        pressBehavior="close"
       />
     ),
     []
@@ -365,6 +387,155 @@ export default function Map() {
     pushLocationUpdate(r.latitude, r.longitude);
   }, [pushLocationUpdate]);
 
+  const stopFollowingUser = useCallback(() => {
+    if (!isFollowingUser) {
+      return;
+    }
+    setIsFollowingUser(false);
+  }, [isFollowingUser]);
+
+  useEffect(() => {
+    if (!isFollowingUser) {
+      followSubscriptionRef.current?.remove();
+      followSubscriptionRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            distanceInterval: 5,
+            timeInterval: 1500,
+          },
+          (position) => {
+            if (!isFollowingUser) {
+              return;
+            }
+
+            const nextRegion: Region = {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              latitudeDelta: 0.005,
+              longitudeDelta: 0.005,
+            };
+
+            setRegion(nextRegion);
+            mapRef.current?.animateToRegion(nextRegion, 500);
+            pushLocationUpdate(nextRegion.latitude, nextRegion.longitude);
+          }
+        );
+
+        if (cancelled) {
+          subscription.remove();
+          return;
+        }
+
+        followSubscriptionRef.current = subscription;
+      } catch (error) {
+        console.warn('Unable to start follow mode', error);
+        setIsFollowingUser(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      followSubscriptionRef.current?.remove();
+      followSubscriptionRef.current = null;
+    };
+  }, [isFollowingUser, pushLocationUpdate]);
+
+  const handleCenterMapPress = useCallback(async () => {
+    setIsFollowingUser(true);
+
+    try {
+      const location = await Location.getCurrentPositionAsync({});
+      const nextRegion: Region = {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        latitudeDelta: 0.005,
+        longitudeDelta: 0.005,
+      };
+
+      setRegion(nextRegion);
+      mapRef.current?.animateToRegion(nextRegion, 450);
+    } catch {
+      if (region) {
+        mapRef.current?.animateToRegion(region, 450);
+      }
+    }
+  }, [region]);
+
+  const handleMapPanDrag = useCallback(() => {
+    stopFollowingUser();
+  }, [stopFollowingUser]);
+
+  const handleMapRegionChangeComplete = useCallback((r: Region, details?: { isGesture?: boolean }) => {
+    if (details?.isGesture) {
+      stopFollowingUser();
+    }
+
+    handleRegionChangeComplete(r);
+  }, [handleRegionChangeComplete, stopFollowingUser]);
+
+  const animateSearchState = useCallback((expand: boolean) => {
+    if (!expand) {
+      setShowFloatingButtons(true);
+    }
+
+    Animated.timing(searchWidthAnim, {
+      toValue: expand ? 1 : 0,
+      duration: 220,
+      useNativeDriver: false,
+    }).start(() => {
+      if (expand) {
+        setShowFloatingButtons(false);
+        searchInputRef.current?.focus();
+      } else {
+        searchInputRef.current?.blur();
+      }
+    });
+  }, [searchWidthAnim]);
+
+  const handleSearchToggle = useCallback(() => {
+    setIsSearchExpanded(prev => {
+      const next = !prev;
+      animateSearchState(next);
+      return next;
+    });
+  }, [animateSearchState]);
+
+  const handleMapPress = useCallback(() => {
+    if (isSearchExpanded) {
+      setIsSearchExpanded(false);
+      animateSearchState(false);
+    }
+  }, [isSearchExpanded, animateSearchState]);
+
+  const expandedSearchWidth = Math.max(58, windowWidth - 36);
+
+  const searchContainerWidth = searchWidthAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [58, expandedSearchWidth],
+  });
+
+  const searchInputOpacity = searchWidthAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0, 0.25, 1],
+  });
+
+  const floatingButtonsOpacity = searchWidthAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0],
+  });
+
+  const floatingButtonsScale = searchWidthAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 0.86],
+  });
+
   if (!region) {
     return (
       <View style={styles.loadingContainer}>
@@ -381,9 +552,11 @@ export default function Map() {
         style={styles.map}
         initialRegion={region}
         showsUserLocation
-        showsMyLocationButton
-        followsUserLocation={true}
-        onRegionChangeComplete={handleRegionChangeComplete}
+        showsMyLocationButton={false}
+        followsUserLocation={isFollowingUser}
+        onPanDrag={handleMapPanDrag}
+        onPress={handleMapPress}
+        onRegionChangeComplete={handleMapRegionChangeComplete}
       >
         {reports.map((report) => (
           <Marker
@@ -391,7 +564,7 @@ export default function Map() {
             coordinate={{ latitude: report.latitude, longitude: report.longitude }}
             onPress={(e) => {
               e.stopPropagation();
-              setSelectedReport(report);
+              handlePresentDetailsModalPress(report);
             }}
           >
             <View style={{ width: 48, height: 48, justifyContent: 'center', alignItems: 'center', overflow: 'visible' }}>
@@ -405,31 +578,45 @@ export default function Map() {
         ))}
       </MapView>
 
-      {/* Test Button for OS Notification */}
-      <TouchableOpacity 
-        style={styles.testNotificationButton} 
-        onPress={async () => {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: "⚠️ Alert is close",
-              body: "Please confirm if the alert is still valid.",
-              categoryIdentifier: "alert_proximity",
-            },
-            trigger: null,
-          });
-        }}
-      >
-        <Text style={{color: 'white', fontWeight: 'bold'}}>Test OS Alert</Text>
-      </TouchableOpacity>
+      {showFloatingButtons && (
+        <Animated.View
+          style={[styles.reportButtonContainer, { opacity: floatingButtonsOpacity, transform: [{ scale: floatingButtonsScale }] }]}
+          pointerEvents={isSearchExpanded ? 'none' : 'auto'}
+        >
+          <TouchableOpacity style={styles.reportButton} onPress={handleReportPress}>
+            <Text style={styles.reportButtonText}>Report</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      )}
 
-      <View style={[styles.wsStatusBadge, wsStatus === 'connected' ? styles.wsConnected : wsStatus === 'reconnecting' ? styles.wsReconnecting : styles.wsDisconnected]}>
-        <Text style={styles.wsStatusText}>WS: {wsStatus}</Text>
-      </View>
+      {showFloatingButtons && (
+        <Animated.View
+          style={[styles.centerMapButtonContainer, { opacity: floatingButtonsOpacity, transform: [{ scale: floatingButtonsScale }] }]}
+          pointerEvents={isSearchExpanded ? 'none' : 'auto'}
+        >
+          <TouchableOpacity style={[styles.centerMapButton, isFollowingUser && styles.centerMapButtonActive]} onPress={handleCenterMapPress}>
+            <MaterialCommunityIcons name="crosshairs-gps" size={34} color="#ffffff" />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
 
-      <View style={styles.reportButtonContainer}>
-        <TouchableOpacity style={styles.reportButton} onPress={handleReportPress}>
-          <Text style={styles.reportButtonText}>Report</Text>
-        </TouchableOpacity>
+      <View style={styles.searchButtonContainer}>
+        <Animated.View style={[styles.searchButtonShell, { width: searchContainerWidth }]}>
+          <TouchableOpacity style={styles.searchIconButton} onPress={handleSearchToggle}>
+            <MaterialCommunityIcons name="magnify" size={28} color="#ffffff" />
+          </TouchableOpacity>
+          <Animated.View style={[styles.searchInputWrap, { opacity: searchInputOpacity }]} pointerEvents={isSearchExpanded ? 'auto' : 'none'}>
+            <TextInput
+              ref={searchInputRef}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              style={styles.searchInput}
+              placeholder="Search"
+              placeholderTextColor="rgba(255,255,255,0.72)"
+              returnKeyType="search"
+            />
+          </Animated.View>
+        </Animated.View>
       </View>
 
       {/* Report Bottom Sheet Modal */}
@@ -464,16 +651,25 @@ export default function Map() {
         </BottomSheetView>
       </BottomSheetModal>
 
-      {/* Pin Details Modal */}
-      <Modal
-        visible={!!selectedReport}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setSelectedReport(null)}
+      {/* Pin Details Bottom Sheet */}
+      <BottomSheetModal
+        ref={detailsBottomSheetModalRef}
+        index={0}
+        snapPoints={detailsSnapPoints}
+        backdropComponent={renderBackdrop}
+        onDismiss={() => setSelectedReport(null)}
+        enableContentPanningGesture={false}
+        handleComponent={() => (
+          <View style={styles.customHandleContainer}>
+            <View style={styles.customHandleGlow}>
+              <View style={styles.customHandleBar} />
+            </View>
+          </View>
+        )}
       >
-        <View style={styles.modalOverlay}>
-          <TouchableOpacity style={styles.modalBackground} activeOpacity={1} onPress={() => setSelectedReport(null)} />
-          <View style={styles.bottomSheetDetails}>
+        <BottomSheetView style={styles.bottomSheetDetails}>
+          <View style={styles.detailsBody}>
+            <Text style={styles.detailsSheetTitle}>Alert details</Text>
             <View style={styles.detailsContainer}>
               <Image
                 source={ALERTS.find(a => a.id === selectedReport?.type)?.icon}
@@ -494,9 +690,10 @@ export default function Map() {
                 )}
               </View>
             </View>
+
           </View>
-        </View>
-      </Modal>
+        </BottomSheetView>
+      </BottomSheetModal>
     </View>
   );
 }
@@ -513,68 +710,87 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  testNotificationButton: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 60 : 40,
-    right: 20,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    zIndex: 10,
-  },
-  wsStatusBadge: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 108 : 86,
-    right: 20,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    zIndex: 10,
-  },
-  wsStatusText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  wsConnected: {
-    backgroundColor: 'rgba(46, 125, 50, 0.92)',
-  },
-  wsReconnecting: {
-    backgroundColor: 'rgba(245, 124, 0, 0.92)',
-  },
-  wsDisconnected: {
-    backgroundColor: 'rgba(198, 40, 40, 0.92)',
-  },
   reportButtonContainer: {
     position: 'absolute',
-    bottom: 40,
     width: '100%',
     alignItems: 'center',
+    bottom: 28,
   },
   reportButton: {
-    backgroundColor: 'rgba(255, 100, 100, 0.9)',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
-    borderRadius: 25,
-    elevation: 5,
+    backgroundColor: 'rgba(255, 92, 92, 0.96)',
+    minWidth: 112,
+    minHeight: 58,
+    paddingHorizontal: 26,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
   },
   reportButtonText: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 19,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
-  modalOverlay: {
+  centerMapButtonContainer: {
+    position: 'absolute',
+    right: 18,
+    bottom: 28,
+  },
+  centerMapButton: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: 'rgba(16, 104, 184, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 0,
+    shadowOpacity: 0,
+  },
+  centerMapButtonActive: {
+    backgroundColor: 'rgba(2, 136, 209, 0.98)',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.95)',
+    shadowColor: '#03a9f4',
+    shadowOpacity: 0.55,
+    shadowRadius: 14,
+    elevation: 14,
+  },
+  searchButtonContainer: {
+    position: 'absolute',
+    left: 18,
+    bottom: 28,
+  },
+  searchButtonShell: {
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: 'rgba(92, 98, 108, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  searchIconButton: {
+    width: 58,
+    height: 58,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchInputWrap: {
     flex: 1,
-    justifyContent: 'flex-end',
+    paddingRight: 14,
   },
-  modalBackground: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+  searchInput: {
+    color: '#fff',
+    fontSize: 16,
+    paddingVertical: 0,
   },
   bottomSheetContentContainer: {
     flex: 1,
@@ -646,13 +862,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    padding: 24,
-    minHeight: 180,
+    minHeight: 220,
+    overflow: 'hidden',
+  },
+  detailsBody: {
+    paddingHorizontal: 24,
+    paddingBottom: 24,
+    paddingTop: 8,
+  },
+  detailsSheetTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 14,
+    color: '#111',
   },
   detailsContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 10,
   },
   detailsIcon: {
     width: 60,
@@ -664,7 +890,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   detailsLabel: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: 'bold',
     color: '#000',
     marginBottom: 4,
@@ -672,13 +898,13 @@ const styles = StyleSheet.create({
   detailsTime: {
     fontSize: 16,
     color: '#666',
+    marginBottom: 8,
   },
   deleteButton: {
-    backgroundColor: '#ff4444',
+    backgroundColor: 'rgba(210, 47, 47, 0.95)',
     paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    marginTop: 10,
+    paddingHorizontal: 18,
+    borderRadius: 999,
     alignSelf: 'flex-start'
   },
   deleteButtonText: {
