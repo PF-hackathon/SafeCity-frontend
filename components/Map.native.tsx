@@ -1,4 +1,4 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState, Platform } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
@@ -66,6 +66,7 @@ export default function Map() {
   const [showFloatingButtons, setShowFloatingButtons] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [inAppVotePrompt, setInAppVotePrompt] = useState<{ id: string; type: string } | null>(null);
+  const [inAppVoteQueue, setInAppVoteQueue] = useState<Array<{ id: string; type: string }>>([]);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
   const searchInputRef = useRef<TextInput>(null);
 
@@ -169,8 +170,12 @@ export default function Map() {
     }
   };
 
-  const showInAppVotePrompt = useCallback((report: { id: string; type: string }) => {
-    setInAppVotePrompt(report);
+  const showInAppVotePrompt = useCallback((reportsToPrompt: Array<{ id: string; type: string }>) => {
+    setInAppVoteQueue((prev) => {
+      const existing = new Set(prev.map((item) => item.id));
+      const toAppend = reportsToPrompt.filter((item) => !existing.has(item.id));
+      return [...prev, ...toAppend];
+    });
   }, []);
 
   const handleInAppVote = useCallback((vote: 'still_there' | 'not_there') => {
@@ -189,9 +194,12 @@ export default function Map() {
         title: 'Alert nearby',
         body: `Is ${report.type} still there?`,
         categoryIdentifier: 'alert_proximity',
+        sound: true,
         data: { alertId: report.id },
       },
-      trigger: null,
+      trigger: Platform.OS === 'android'
+        ? { seconds: 1, channelId: 'alerts-vote' }
+        : null,
     });
   }, []);
 
@@ -233,6 +241,20 @@ export default function Map() {
     }
 
     const incomingReport = toReport(newAlert);
+
+    if (
+      incomingReport.creatorSessionId !== SESSION_ID &&
+      !promptedAlertIdsRef.current.has(incomingReport.id)
+    ) {
+      promptedAlertIdsRef.current.add(incomingReport.id);
+
+      if (appStateRef.current === 'active') {
+        showInAppVotePrompt([{ id: incomingReport.id, type: incomingReport.type }]);
+      } else {
+        void showBackgroundVoteNotification({ id: incomingReport.id, type: incomingReport.type });
+      }
+    }
+
     setReports(prev => {
       if (prev.some(report => report.id === incomingReport.id)) {
         return prev;
@@ -256,18 +278,25 @@ export default function Map() {
 
       return dedupeReports([...prev, incomingReport]);
     });
-  }, [newAlert, toReport, dedupeReports]);
+  }, [newAlert, toReport, dedupeReports, showBackgroundVoteNotification, showInAppVotePrompt]);
 
   useEffect(() => {
-    const unseenReports = reports.filter((report) => !promptedAlertIdsRef.current.has(report.id));
+    const unseenReports = reports.filter((report) => {
+      if (report.creatorSessionId === SESSION_ID) {
+        return false;
+      }
+
+      return !promptedAlertIdsRef.current.has(report.id);
+    });
     if (!unseenReports.length) {
       return;
     }
 
     if (appStateRef.current === 'active') {
-      const report = unseenReports[0];
-      promptedAlertIdsRef.current.add(report.id);
-      showInAppVotePrompt(report);
+      unseenReports.forEach((report) => {
+        promptedAlertIdsRef.current.add(report.id);
+      });
+      showInAppVotePrompt(unseenReports);
       return;
     }
 
@@ -276,6 +305,16 @@ export default function Map() {
       void showBackgroundVoteNotification(report);
     });
   }, [reports, showBackgroundVoteNotification, showInAppVotePrompt]);
+
+  useEffect(() => {
+    if (inAppVotePrompt || inAppVoteQueue.length === 0) {
+      return;
+    }
+
+    const [nextPrompt, ...rest] = inAppVoteQueue;
+    setInAppVotePrompt(nextPrompt);
+    setInAppVoteQueue(rest);
+  }, [inAppVotePrompt, inAppVoteQueue]);
 
   const pushLocationUpdate = useCallback((latitude: number, longitude: number) => {
     const now = Date.now();
@@ -413,6 +452,16 @@ export default function Map() {
       }
 
       if (finalNotificationStatus === 'granted') {
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('alerts-vote', {
+            name: 'Alert Votes',
+            importance: Notifications.AndroidImportance.MAX,
+            vibrationPattern: [0, 250, 150, 250],
+            lightColor: '#0288d1',
+            sound: 'default',
+          });
+        }
+
         await Notifications.setNotificationCategoryAsync('alert_proximity', [
           {
             identifier: 'not_there',
