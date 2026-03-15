@@ -1,8 +1,7 @@
 import { StyleSheet, View } from 'react-native';
-
 import Map from '@/components/Map';
 
-export default function HomeScreen() {
+export default function MapScreen() {
   return (
     <View style={styles.container}>
       <Map />
