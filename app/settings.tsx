@@ -13,6 +13,9 @@ import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 import { useThemeContext } from '@/context/ThemeContext';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// inside the file
 export default function SettingsScreen() {
   const { theme, colorScheme, setTheme } = useThemeContext();
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -27,6 +30,12 @@ export default function SettingsScreen() {
   useEffect(() => {
     // Check initial notification status
     const checkPermissions = async () => {
+      const softOptOut = await AsyncStorage.getItem('notifications-muted');
+      if (softOptOut === 'true') {
+        setNotificationsEnabled(false);
+        return;
+      }
+      
       const { status } = await Notifications.getPermissionsAsync();
       setNotificationsEnabled(status === 'granted');
     };
@@ -41,27 +50,26 @@ export default function SettingsScreen() {
 
   const handleToggleNotifications = async (value: boolean) => {
     triggerHaptic();
+    // Optimistically update the UI so the switch doesn't snap back instantly
+    setNotificationsEnabled(value);
+
     if (value) {
       const { status } = await Notifications.requestPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert(
           'Permission Required',
-          'Please enable notifications in your system settings.',
+          'Please enable notifications in your system settings to receive alerts.',
           [{ text: 'OK' }]
         );
+        // Revert if permission was denied
         setNotificationsEnabled(false);
       } else {
+        await AsyncStorage.setItem('notifications-muted', 'false');
         setNotificationsEnabled(true);
       }
     } else {
-      Alert.alert(
-        'Disable Notifications',
-        'To disable notifications, please go to your system settings.',
-        [{ text: 'OK' }]
-      );
-      // We visually revert the switch if they can't natively toggle it off here, OR we can let it sit visually off but it requires system settings.
-      // Easiest approach for React Native without linking to settings is to reset it.
-      setNotificationsEnabled(true);
+      await AsyncStorage.setItem('notifications-muted', 'true');
+      setNotificationsEnabled(false);
     }
   };
 

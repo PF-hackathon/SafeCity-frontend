@@ -702,6 +702,8 @@ export default function Map() {
         initialRegion={region}
         showsUserLocation
         showsMyLocationButton={false}
+        showsCompass={true}
+        mapPadding={{ top: 60, right: 10, bottom: 0, left: 0 }}
         followsUserLocation={false}
         toolbarEnabled={false}
         onPanDrag={handleMapPanDrag}
