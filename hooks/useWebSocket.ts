@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Client } from '@stomp/stompjs';
-import SockJS from 'sockjs-client';
+import { Client, ActivationState } from '@stomp/stompjs';
 
 // Polyfill for TextEncoder/TextDecoder required by stompjs in React Native
 import * as TextEncoding from 'text-encoding';
@@ -11,7 +10,9 @@ if (typeof global.TextDecoder === 'undefined') {
   global.TextDecoder = TextEncoding.TextDecoder as any;
 }
 
-const WS_BASE_URL = 'https://undenotable-cyrus-nemoricole.ngrok-free.dev/ws';
+const STOMP_TRANSPORTS = [
+  { label: 'native:/ws', wsUrl: 'ws://10.108.5.101:8080/ws' },
+];
 
 export type Alert = {
   alertId: number;
@@ -28,23 +29,76 @@ export type Alert = {
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
 
-export const useWebSocket = () => {
+export const useWebSocket = (sessionId?: string) => {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [initialAlerts, setInitialAlerts] = useState<Alert[]>([]);
   const [newAlert, setNewAlert] = useState<Alert | null>(null);
   const stompClientRef = useRef<Client | null>(null);
+  const currentTransportIndexRef = useRef(0);
+  const connectedOnceRef = useRef(false);
+  const queuedLocationRef = useRef<{ longitude: number; latitude: number } | null>(null);
 
   useEffect(() => {
+    // Ensure deterministic startup transport after fast refresh/reloads.
+    currentTransportIndexRef.current = 0;
+
+    const nativeWebSocket = globalThis.WebSocket;
+    if (!nativeWebSocket) {
+      console.error('WebSocket is not available in this runtime');
+      setStatus('disconnected');
+      return;
+    }
+
+    const getCurrentTransport = () => STOMP_TRANSPORTS[currentTransportIndexRef.current];
+    const getCurrentTransportLabel = () => getCurrentTransport().label;
+    const withSessionQuery = (url: string) => {
+      if (!sessionId) {
+        return url;
+      }
+
+      const separator = url.includes('?') ? '&' : '?';
+      return `${url}${separator}sessionId=${encodeURIComponent(sessionId)}`;
+    };
+
+    const getCurrentBrokerUrl = () => {
+      const transport = getCurrentTransport();
+      return transport.wsUrl ? withSessionQuery(transport.wsUrl) : undefined;
+    };
+    const createSocket = () => {
+      const transport = getCurrentTransport();
+      return new nativeWebSocket(withSessionQuery(transport.wsUrl!), ['v12.stomp', 'v11.stomp', 'v10.stomp']);
+    };
+
     const client = new Client({
-      webSocketFactory: () => new SockJS(WS_BASE_URL),
+      brokerURL: getCurrentBrokerUrl(),
+      connectHeaders: sessionId ? { 'X-Session-Id': sessionId } : {},
+      connectionTimeout: 20000,
+      // Do not rely on STOMP global lookup in React Native; use native socket directly.
+      webSocketFactory: () => createSocket(),
       reconnectDelay: 5000,
       heartbeatIncoming: 4000,
       heartbeatOutgoing: 4000,
-      // Debug logging if needed:
-      // debug: (str) => console.log('STOMP: ', str),
+      debug: (str) => console.log(`[STOMP Debug][${getCurrentTransportLabel()}]`, str),
+      beforeConnect: () => {
+        console.log('Activating STOMP transport', {
+          transport: getCurrentTransportLabel(),
+          hasSessionHeader: Boolean(sessionId),
+          brokerURL: getCurrentBrokerUrl(),
+        });
+      },
       onConnect: () => {
-        console.log('STOMP connected');
+        connectedOnceRef.current = true;
+        console.log('STOMP connected on', getCurrentTransportLabel());
         setStatus('connected');
+
+        if (queuedLocationRef.current) {
+          const { longitude, latitude } = queuedLocationRef.current;
+          client.publish({
+            destination: '/app/location.update',
+            body: JSON.stringify({ longitude, latitude }),
+          });
+          queuedLocationRef.current = null;
+        }
         
         // Subscribe to private channel for nearby alerts
         // The backend uses StompPrincipal to route this specifically to our session
@@ -80,16 +134,41 @@ export const useWebSocket = () => {
         console.error('Additional details: ' + frame.body);
       },
       onWebSocketError: (error) => {
-        console.error('WebSocket Error', error);
+        console.error('WebSocket Error on', getCurrentTransportLabel(), error);
         setStatus('reconnecting');
       },
-      onWebSocketClose: () => {
-        console.log('WebSocket connection closed');
+      onWebSocketClose: (event) => {
+        console.log('WebSocket connection closed', {
+          transport: getCurrentTransportLabel(),
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+        });
+
+        // If we have not connected yet, rotate transport and retry.
+        if (!connectedOnceRef.current && STOMP_TRANSPORTS.length > 1) {
+          currentTransportIndexRef.current = (currentTransportIndexRef.current + 1) % STOMP_TRANSPORTS.length;
+          console.log('Switching STOMP transport to', getCurrentTransportLabel());
+        }
+
         setStatus('reconnecting');
+      },
+      onChangeState: (state) => {
+        if (state === ActivationState.ACTIVE) {
+          setStatus('reconnecting');
+        } else if (state === ActivationState.DEACTIVATING || state === ActivationState.INACTIVE) {
+          setStatus('disconnected');
+        }
       }
     });
 
-    client.activate();
+    try {
+      setStatus('reconnecting');
+      client.activate();
+    } catch (error) {
+      console.error('Failed to activate STOMP client', error);
+      setStatus('disconnected');
+    }
     stompClientRef.current = client;
 
     return () => {
@@ -104,7 +183,8 @@ export const useWebSocket = () => {
         body: JSON.stringify({ longitude, latitude }),
       });
     } else {
-      console.warn('Cannot send location: STOMP client is not connected');
+      queuedLocationRef.current = { longitude, latitude };
+      console.log('Queued location update until STOMP is connected');
     }
   }, []);
 

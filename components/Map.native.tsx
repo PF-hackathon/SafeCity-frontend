@@ -40,6 +40,7 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { BottomSheetModal, BottomSheetView, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -57,8 +58,19 @@ export default function Map() {
 
   const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const { status: wsStatus, sendLocation, initialAlerts, newAlert } = useWebSocket(SESSION_ID);
+  const lastLocationPushRef = useRef<{ latitude: number; longitude: number; ts: number } | null>(null);
 
   const [selectedReport, setSelectedReport] = useState<any>(null);
+
+  const toReport = useCallback((item: any) => ({
+    id: item.alertId.toString(),
+    type: TYPE_ID_TO_ALERT_ID[item.typeId] || 'Fire',
+    latitude: item.latitude,
+    longitude: item.longitude,
+    timestamp: new Date(item.timeOfReport || Date.now()).getTime(),
+    creatorSessionId: item.creatorSessionId,
+  }), []);
 
   // Bottom Sheet Ref & Setup
   const bottomSheetModalRef = useRef<BottomSheetModal>(null);
@@ -113,20 +125,51 @@ export default function Map() {
     return () => subscription.remove();
   }, []);
 
+  useEffect(() => {
+    if (!initialAlerts.length) {
+      return;
+    }
+
+    setReports(initialAlerts.map(toReport));
+  }, [initialAlerts, toReport]);
+
+  useEffect(() => {
+    if (!newAlert) {
+      return;
+    }
+
+    const incomingReport = toReport(newAlert);
+    setReports(prev => {
+      if (prev.some(report => report.id === incomingReport.id)) {
+        return prev;
+      }
+      return [...prev, incomingReport];
+    });
+  }, [newAlert, toReport]);
+
+  const pushLocationUpdate = useCallback((latitude: number, longitude: number) => {
+    const now = Date.now();
+    const last = lastLocationPushRef.current;
+    if (last) {
+      const msSinceLast = now - last.ts;
+      const movedEnough = Math.abs(last.latitude - latitude) > 0.0005 || Math.abs(last.longitude - longitude) > 0.0005;
+
+      if (msSinceLast < 5000 && !movedEnough) {
+        return;
+      }
+    }
+
+    sendLocation(longitude, latitude);
+    lastLocationPushRef.current = { latitude, longitude, ts: now };
+  }, [sendLocation]);
+
 
   const fetchNearbyAlerts = async (lat: number, lon: number) => {
     try {
       const response = await fetch(`${API_BASE_URL}/alerts/nearby?latitude=${lat}&longitude=${lon}`);
       if (response.ok) {
         const data = await response.json();
-        const mappedReports = data.map((item: any) => ({
-          id: item.alertId.toString(),
-          type: TYPE_ID_TO_ALERT_ID[item.typeId] || 'Fire',
-          latitude: item.latitude,
-          longitude: item.longitude,
-          timestamp: new Date(item.timeOfReport || Date.now()).getTime(),
-          creatorSessionId: item.creatorSessionId,
-        }));
+        const mappedReports = data.map((item: any) => toReport(item));
         setReports(mappedReports);
       }
     } catch (error) {
@@ -263,6 +306,7 @@ export default function Map() {
           longitudeDelta: 0.005,
         });
         fetchNearbyAlerts(location.coords.latitude, location.coords.longitude);
+        pushLocationUpdate(location.coords.latitude, location.coords.longitude);
       } catch (error) {
         console.warn('Error fetching location:', error);
         // Fallback to Sofia if an error occurs but permissions were granted
@@ -273,9 +317,15 @@ export default function Map() {
           longitudeDelta: 0.0421,
         });
         fetchNearbyAlerts(42.6977, 23.3219);
+        pushLocationUpdate(42.6977, 23.3219);
       }
     })();
-  }, []);
+  }, [pushLocationUpdate]);
+
+  const handleRegionChangeComplete = useCallback((r: Region) => {
+    fetchNearbyAlerts(r.latitude, r.longitude);
+    pushLocationUpdate(r.latitude, r.longitude);
+  }, [pushLocationUpdate]);
 
   if (!region) {
     return (
@@ -295,7 +345,7 @@ export default function Map() {
         showsUserLocation
         showsMyLocationButton
         followsUserLocation={true}
-        onRegionChangeComplete={(r) => fetchNearbyAlerts(r.latitude, r.longitude)}
+        onRegionChangeComplete={handleRegionChangeComplete}
       >
         {reports.map((report) => (
           <Marker
@@ -333,6 +383,10 @@ export default function Map() {
       >
         <Text style={{color: 'white', fontWeight: 'bold'}}>Test OS Alert</Text>
       </TouchableOpacity>
+
+      <View style={[styles.wsStatusBadge, wsStatus === 'connected' ? styles.wsConnected : wsStatus === 'reconnecting' ? styles.wsReconnecting : styles.wsDisconnected]}>
+        <Text style={styles.wsStatusText}>WS: {wsStatus}</Text>
+      </View>
 
       <View style={styles.reportButtonContainer}>
         <TouchableOpacity style={styles.reportButton} onPress={handleReportPress}>
@@ -430,6 +484,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 8,
     zIndex: 10,
+  },
+  wsStatusBadge: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 108 : 86,
+    right: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    zIndex: 10,
+  },
+  wsStatusText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  wsConnected: {
+    backgroundColor: 'rgba(46, 125, 50, 0.92)',
+  },
+  wsReconnecting: {
+    backgroundColor: 'rgba(245, 124, 0, 0.92)',
+  },
+  wsDisconnected: {
+    backgroundColor: 'rgba(198, 40, 40, 0.92)',
   },
   reportButtonContainer: {
     position: 'absolute',
