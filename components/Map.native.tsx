@@ -17,9 +17,12 @@ const PIN_ICONS: Record<string, any> = {
   'Dark Area': require('@/assets/pin-icons/Dark Area Pin Icon Large.png'),
 };
 
-const API_HOST_URL = 'http://10.108.5.101:8080';
+const API_HOST_URL = 'https://undenotable-cyrus-nemoricole.ngrok-free.dev';
 const API_BASE_URL = `${API_HOST_URL}/api/v1`;
 const SESSION_ID = Math.random().toString(36).substring(2, 15);
+const API_COMMON_HEADERS = {
+  'ngrok-skip-browser-warning': 'true',
+};
 
 const ALERT_ID_TO_TYPE_ID: Record<string, number> = {
   'Theft': 1,
@@ -362,6 +365,7 @@ export default function Map() {
       const responseVote = await fetch(`${API_BASE_URL}/alerts/${encodeURIComponent(alertId)}/vote`, {
         method: 'POST',
         headers: {
+          ...API_COMMON_HEADERS,
           'Content-Type': 'application/json',
           'X-Session-Id': SESSION_ID,
         },
@@ -561,7 +565,11 @@ export default function Map() {
 
   const fetchNearbyAlerts = useCallback(async (lat: number, lon: number) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/alerts/nearby?latitude=${lat}&longitude=${lon}`);
+      const response = await fetch(`${API_BASE_URL}/alerts/nearby?latitude=${lat}&longitude=${lon}`, {
+        headers: {
+          ...API_COMMON_HEADERS,
+        },
+      });
       if (response.ok) {
         const data = await response.json();
         const mappedReports = data.map((item: any) => toReport(item));
@@ -613,6 +621,7 @@ export default function Map() {
         const response = await fetch(`${API_BASE_URL}/alerts`, {
           method: 'POST',
           headers: {
+            ...API_COMMON_HEADERS,
             'Content-Type': 'application/json',
             'X-Session-Id': SESSION_ID,
           },
@@ -656,6 +665,7 @@ export default function Map() {
       const response = await fetch(`${API_BASE_URL}/alerts/${id}`, {
         method: 'DELETE',
         headers: {
+          ...API_COMMON_HEADERS,
           'X-Session-Id': SESSION_ID,
         },
       });

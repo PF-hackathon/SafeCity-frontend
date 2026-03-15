@@ -12,7 +12,10 @@ if (typeof global.TextDecoder === "undefined") {
 }
 
 const STOMP_TRANSPORTS = [
-  { label: "native:/ws", wsUrl: "ws://10.108.5.101:8080/ws" },
+  {
+    label: "native:/ws",
+    wsUrl: "wss://undenotable-cyrus-nemoricole.ngrok-free.dev/ws",
+  },
 ];
 
 export type Alert = {
