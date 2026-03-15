@@ -2,11 +2,36 @@ import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Modal, Ima
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
-  { id: 'Theft', label: 'Theft', icon: require('@/assets/alert-icons/Theft.png') },
-  { id: 'Harm', label: 'Harm', icon: require('@/assets/alert-icons/Harm.png') },
-  { id: 'Bad Infrastructure', label: 'Bad Infrastructure', icon: require('@/assets/alert-icons/Bad_Infrastructure.png') },
-  { id: 'Dark Area', label: 'Dark Area', icon: require('@/assets/alert-icons/Dark_Area.png') },
-  { id: 'Fire', label: 'Fire', icon: require('@/assets/alert-icons/Fire.png') },
+  {
+    id: 'Theft',
+    label: 'Theft',
+    icon: require('@/assets/alert-icons/Theft.png'),
+    markerIcon: require('@/assets/alert-icons/marker/Theft.png'),
+  },
+  {
+    id: 'Harm',
+    label: 'Harm',
+    icon: require('@/assets/alert-icons/Harm.png'),
+    markerIcon: require('@/assets/alert-icons/marker/Harm.png'),
+  },
+  {
+    id: 'Bad Infrastructure',
+    label: 'Bad Infrastructure',
+    icon: require('@/assets/alert-icons/Bad_Infrastructure.png'),
+    markerIcon: require('@/assets/alert-icons/marker/Bad_Infrastructure.png'),
+  },
+  {
+    id: 'Dark Area',
+    label: 'Dark Area',
+    icon: require('@/assets/alert-icons/Dark_Area.png'),
+    markerIcon: require('@/assets/alert-icons/marker/Dark_Area.png'),
+  },
+  {
+    id: 'Fire',
+    label: 'Fire',
+    icon: require('@/assets/alert-icons/Fire.png'),
+    markerIcon: require('@/assets/alert-icons/marker/Fire.png'),
+  },
 ];
 
 const API_BASE_URL = 'http://10.108.5.101:8080/api/v1';
@@ -293,19 +318,13 @@ export default function Map() {
           <Marker
             key={report.id}
             coordinate={{ latitude: report.latitude, longitude: report.longitude }}
+            image={ALERTS.find(a => a.id === report.type)?.markerIcon}
+            tracksViewChanges={false}
             onPress={(e) => {
               e.stopPropagation();
               setSelectedReport(report);
             }}
-          >
-            <View style={styles.markerContainer}>
-              <Image
-                source={ALERTS.find(a => a.id === report.type)?.icon}
-                style={styles.markerIcon}
-                resizeMode="contain"
-              />
-            </View>
-          </Marker>
+          />
         ))}
       </MapView>
 
@@ -510,14 +529,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'center',
     color: '#333',
-  },
-  markerContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  markerIcon: {
-    width: 40,
-    height: 40,
   },
   bottomSheetDetails: {
     backgroundColor: '#fff',
