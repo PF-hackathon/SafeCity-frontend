@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { AppState } from "react-native";
 import { Client, ActivationState } from "@stomp/stompjs";
 
 // Polyfill for TextEncoder/TextDecoder required by stompjs in React Native
@@ -189,10 +190,37 @@ export const useWebSocket = (sessionId?: string) => {
     }
     stompClientRef.current = client;
 
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      (nextAppState) => {
+        if (nextAppState === "active") {
+          if (client.active || client.state !== ActivationState.INACTIVE) {
+            return;
+          }
+
+          try {
+            setStatus("reconnecting");
+            client.activate();
+          } catch (error) {
+            console.error("Failed to reactivate STOMP client", error);
+          }
+          return;
+        }
+
+        if (nextAppState === "inactive" || nextAppState === "background") {
+          if (!client.active || client.state === ActivationState.INACTIVE) {
+            return;
+          }
+          void client.deactivate();
+        }
+      },
+    );
+
     return () => {
-      client.deactivate();
+      appStateSubscription.remove();
+      void client.deactivate();
     };
-  }, []);
+  }, [sessionId]);
 
   const sendLocation = useCallback((longitude: number, latitude: number) => {
     if (stompClientRef.current && stompClientRef.current.connected) {

@@ -72,6 +72,14 @@ export default function Map() {
     creatorSessionId: item.creatorSessionId,
   }), []);
 
+  const dedupeReports = useCallback((items: { id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]) => {
+    const reportById = new globalThis.Map<string, { id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }>();
+    items.forEach((report) => {
+      reportById.set(report.id, report);
+    });
+    return Array.from(reportById.values());
+  }, []);
+
   // Bottom Sheet Ref & Setup
   const bottomSheetModalRef = useRef<BottomSheetModal>(null);
   const snapPoints = useMemo(() => ['50%', '90%'], []);
@@ -130,8 +138,8 @@ export default function Map() {
       return;
     }
 
-    setReports(initialAlerts.map(toReport));
-  }, [initialAlerts, toReport]);
+    setReports(dedupeReports(initialAlerts.map(toReport)));
+  }, [initialAlerts, toReport, dedupeReports]);
 
   useEffect(() => {
     if (!newAlert) {
@@ -143,9 +151,26 @@ export default function Map() {
       if (prev.some(report => report.id === incomingReport.id)) {
         return prev;
       }
-      return [...prev, incomingReport];
+
+      const optimisticIndex = prev.findIndex((report) => {
+        if (report.creatorSessionId !== SESSION_ID || incomingReport.creatorSessionId !== SESSION_ID) {
+          return false;
+        }
+
+        const sameType = report.type === incomingReport.type;
+        const sameLocation = Math.abs(report.latitude - incomingReport.latitude) < 0.00001 && Math.abs(report.longitude - incomingReport.longitude) < 0.00001;
+        return sameType && sameLocation;
+      });
+
+      if (optimisticIndex >= 0) {
+        const next = [...prev];
+        next[optimisticIndex] = incomingReport;
+        return dedupeReports(next);
+      }
+
+      return dedupeReports([...prev, incomingReport]);
     });
-  }, [newAlert, toReport]);
+  }, [newAlert, toReport, dedupeReports]);
 
   const pushLocationUpdate = useCallback((latitude: number, longitude: number) => {
     const now = Date.now();
@@ -170,7 +195,7 @@ export default function Map() {
       if (response.ok) {
         const data = await response.json();
         const mappedReports = data.map((item: any) => toReport(item));
-        setReports(mappedReports);
+        setReports(dedupeReports(mappedReports));
       }
     } catch (error) {
       console.error('Error fetching alerts:', error);
@@ -230,7 +255,20 @@ export default function Map() {
 
         if (response.ok) {
           const createdAlert = await response.json();
-          setReports(prev => prev.map(r => r.id === optimisticId ? { ...r, id: createdAlert.alertId.toString() } : r));
+          const createdId = createdAlert.alertId.toString();
+          setReports(prev => {
+            const withoutOptimistic = prev.filter(r => r.id !== optimisticId);
+            if (withoutOptimistic.some(r => r.id === createdId)) {
+              return withoutOptimistic;
+            }
+
+            const optimisticReport = prev.find(r => r.id === optimisticId);
+            if (!optimisticReport) {
+              return withoutOptimistic;
+            }
+
+            return [...withoutOptimistic, { ...optimisticReport, id: createdId }];
+          });
         } else {
           console.error('Failed to create alert', await response.text());
         }
@@ -349,7 +387,7 @@ export default function Map() {
       >
         {reports.map((report) => (
           <Marker
-            key={report.id}
+            key={`${report.id}-${report.timestamp}-${report.latitude}-${report.longitude}`}
             coordinate={{ latitude: report.latitude, longitude: report.longitude }}
             onPress={(e) => {
               e.stopPropagation();
