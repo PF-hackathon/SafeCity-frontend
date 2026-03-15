@@ -42,6 +42,7 @@ const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
 
 const EARTH_RADIUS_KM = 6371;
 const SEARCH_RADIUS_KM = 20;
+const ROUTE_ALERT_MAX_POINTS = 40;
 
 const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
 
@@ -110,6 +111,7 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheetModal, BottomSheetView, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -256,6 +258,7 @@ export default function Map() {
   };
 
   const { colorScheme } = useThemeContext();
+  const insets = useSafeAreaInsets();
   const isDark = colorScheme === 'dark';
   const { width: windowWidth } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
@@ -272,19 +275,35 @@ export default function Map() {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [currentUserLocation, setCurrentUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [walkingRouteCoords, setWalkingRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const [isPromptSuppressed, setIsPromptSuppressed] = useState(false);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [inAppVotePrompt, setInAppVotePrompt] = useState<{ id: string; type: string } | null>(null);
   const [inAppVoteQueue, setInAppVoteQueue] = useState<Array<{ id: string; type: string }>>([]);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
   const searchInputRef = useRef<TextInput>(null);
   const searchAbortControllerRef = useRef<AbortController | null>(null);
+  const promptSuppressionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const { sendLocation, initialAlerts, newAlert } = useWebSocket(SESSION_ID);
   const lastLocationPushRef = useRef<{ latitude: number; longitude: number; ts: number } | null>(null);
+  const routeOverlayReportsRef = useRef<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
 
   const [selectedReport, setSelectedReport] = useState<any>(null);
+
+  const suppressPromptsForRouteAlerts = useCallback((durationMs: number = 5000) => {
+    if (promptSuppressionTimerRef.current) {
+      clearTimeout(promptSuppressionTimerRef.current);
+      promptSuppressionTimerRef.current = null;
+    }
+
+    setIsPromptSuppressed(true);
+    promptSuppressionTimerRef.current = setTimeout(() => {
+      setIsPromptSuppressed(false);
+      promptSuppressionTimerRef.current = null;
+    }, durationMs);
+  }, []);
 
   const toReport = useCallback((item: any) => ({
     id: item.alertId.toString(),
@@ -511,6 +530,14 @@ export default function Map() {
   }, [newAlert, toReport, dedupeReports, showBackgroundVoteNotification, showInAppVotePrompt]);
 
   useEffect(() => {
+    return () => {
+      if (promptSuppressionTimerRef.current) {
+        clearTimeout(promptSuppressionTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const unseenReports = reports.filter((report) => {
       if (report.creatorSessionId === SESSION_ID) {
         return false;
@@ -518,7 +545,7 @@ export default function Map() {
 
       return !promptedAlertIdsRef.current.has(report.id);
     });
-    if (!unseenReports.length) {
+    if (walkingRouteCoords.length > 1 || isPromptSuppressed || !unseenReports.length) {
       return;
     }
 
@@ -534,17 +561,17 @@ export default function Map() {
       promptedAlertIdsRef.current.add(report.id);
       void showBackgroundVoteNotification(report);
     });
-  }, [reports, showBackgroundVoteNotification, showInAppVotePrompt]);
+  }, [reports, showBackgroundVoteNotification, showInAppVotePrompt, walkingRouteCoords.length, isPromptSuppressed]);
 
   useEffect(() => {
-    if (inAppVotePrompt || inAppVoteQueue.length === 0) {
+    if (walkingRouteCoords.length > 1 || isPromptSuppressed || inAppVotePrompt || inAppVoteQueue.length === 0) {
       return;
     }
 
     const [nextPrompt, ...rest] = inAppVoteQueue;
     setInAppVotePrompt(nextPrompt);
     setInAppVoteQueue(rest);
-  }, [inAppVotePrompt, inAppVoteQueue]);
+  }, [inAppVotePrompt, inAppVoteQueue, walkingRouteCoords.length, isPromptSuppressed]);
 
   const pushLocationUpdate = useCallback((latitude: number, longitude: number) => {
     const now = Date.now();
@@ -573,12 +600,90 @@ export default function Map() {
       if (response.ok) {
         const data = await response.json();
         const mappedReports = data.map((item: any) => toReport(item));
-        setReports(dedupeReports(mappedReports));
+        setReports(dedupeReports([...mappedReports, ...routeOverlayReportsRef.current]));
       }
     } catch (error) {
       console.error('Error fetching alerts:', error);
     }
   }, [toReport, dedupeReports]);
+
+  const fetchAlertsAlongRoute = useCallback(async (routePoints: { latitude: number; longitude: number }[]) => {
+    if (!routePoints.length) {
+      return;
+    }
+
+    const stride = Math.max(1, Math.ceil(routePoints.length / ROUTE_ALERT_MAX_POINTS));
+    const sampledPoints = routePoints.filter((_, index) => index % stride === 0);
+
+    // Always include final destination point.
+    const lastPoint = routePoints[routePoints.length - 1];
+    if (
+      sampledPoints.length === 0 ||
+      sampledPoints[sampledPoints.length - 1].latitude !== lastPoint.latitude ||
+      sampledPoints[sampledPoints.length - 1].longitude !== lastPoint.longitude
+    ) {
+      sampledPoints.push(lastPoint);
+    }
+
+    try {
+      const responses = await Promise.allSettled(
+        sampledPoints.map((point) =>
+          fetch(`${API_BASE_URL}/alerts/nearby?latitude=${point.latitude}&longitude=${point.longitude}`, {
+            headers: {
+              ...API_COMMON_HEADERS,
+            },
+          }),
+        ),
+      );
+
+      const collectedAlerts: any[] = [];
+
+      for (const responseResult of responses) {
+        if (responseResult.status !== 'fulfilled') {
+          continue;
+        }
+
+        const response = responseResult.value;
+        if (!response.ok) {
+          continue;
+        }
+
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          collectedAlerts.push(...data);
+        }
+      }
+
+      const mappedRouteReports = collectedAlerts.map((item: any) => toReport(item));
+      const dedupedRouteReports = dedupeReports(mappedRouteReports);
+      routeOverlayReportsRef.current = dedupedRouteReports;
+
+      // Keep baseline behavior: always start from alerts near the user's current location.
+      let mappedNearbyReports: { id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[] = [];
+      if (currentUserLocation) {
+        const nearbyResponse = await fetch(
+          `${API_BASE_URL}/alerts/nearby?latitude=${currentUserLocation.latitude}&longitude=${currentUserLocation.longitude}`,
+          {
+            headers: {
+              ...API_COMMON_HEADERS,
+            },
+          },
+        );
+
+        if (nearbyResponse.ok) {
+          const nearbyData = await nearbyResponse.json();
+          if (Array.isArray(nearbyData)) {
+            mappedNearbyReports = nearbyData.map((item: any) => toReport(item));
+          }
+        }
+      }
+
+      // Route view = nearby current-location alerts + alerts that overlap sampled route points.
+      setReports(dedupeReports([...mappedNearbyReports, ...dedupedRouteReports]));
+    } catch (error) {
+      console.error('Error fetching alerts along route:', error);
+    }
+  }, [toReport, dedupeReports, currentUserLocation]);
 
   const handleReportPress = async () => {
     try {
@@ -754,10 +859,14 @@ export default function Map() {
     })();
   }, [pushLocationUpdate, fetchNearbyAlerts]);
 
-  const handleRegionChangeComplete = useCallback((r: Region) => {
-    fetchNearbyAlerts(r.latitude, r.longitude);
-    pushLocationUpdate(r.latitude, r.longitude);
-  }, [pushLocationUpdate, fetchNearbyAlerts]);
+  const handleRegionChangeComplete = useCallback((_r: Region) => {
+    if (!currentUserLocation) {
+      return;
+    }
+
+    // Keep baseline behavior tied to user location instead of map viewport.
+    fetchNearbyAlerts(currentUserLocation.latitude, currentUserLocation.longitude);
+  }, [fetchNearbyAlerts, currentUserLocation]);
 
   const stopFollowingUser = useCallback(() => {
     if (!isFollowingUser) {
@@ -965,12 +1074,17 @@ export default function Map() {
       const encodedPolyline = result?.routes?.[0]?.polyline?.encodedPolyline;
 
       if (!encodedPolyline || typeof encodedPolyline !== 'string') {
+        routeOverlayReportsRef.current = [];
         setWalkingRouteCoords([]);
+        if (currentUserLocation) {
+          await fetchNearbyAlerts(currentUserLocation.latitude, currentUserLocation.longitude);
+        }
         return;
       }
 
       const decodedRoute = decodePolyline(encodedPolyline);
       setWalkingRouteCoords(decodedRoute);
+      await fetchAlertsAlongRoute(decodedRoute);
 
       if (decodedRoute.length > 1) {
         mapRef.current?.fitToCoordinates(decodedRoute, {
@@ -980,9 +1094,13 @@ export default function Map() {
       }
     } catch (error) {
       console.warn('Failed to compute walking route', error);
+      routeOverlayReportsRef.current = [];
       setWalkingRouteCoords([]);
+      if (currentUserLocation) {
+        await fetchNearbyAlerts(currentUserLocation.latitude, currentUserLocation.longitude);
+      }
     }
-  }, [currentUserLocation, region]);
+  }, [currentUserLocation, region, fetchAlertsAlongRoute, fetchNearbyAlerts]);
 
   const handleSuggestionSelect = useCallback((suggestion: SearchSuggestion) => {
     const nextRegion: Region = {
@@ -992,6 +1110,9 @@ export default function Map() {
       longitudeDelta: 0.008,
     };
 
+    suppressPromptsForRouteAlerts(5000);
+    setInAppVotePrompt(null);
+    setInAppVoteQueue([]);
     setIsSearchExpanded(false);
     animateSearchState(false);
     Keyboard.dismiss();
@@ -1000,9 +1121,19 @@ export default function Map() {
     setRegion(nextRegion);
     mapRef.current?.animateToRegion(nextRegion, 450);
     void handleBuildWalkingRoute(nextRegion.latitude, nextRegion.longitude);
-    fetchNearbyAlerts(nextRegion.latitude, nextRegion.longitude);
-    pushLocationUpdate(nextRegion.latitude, nextRegion.longitude);
-  }, [pushLocationUpdate, fetchNearbyAlerts, handleBuildWalkingRoute, animateSearchState]);
+  }, [handleBuildWalkingRoute, animateSearchState, suppressPromptsForRouteAlerts]);
+
+  const handleClearSelectedRoute = useCallback(() => {
+    suppressPromptsForRouteAlerts(5000);
+    routeOverlayReportsRef.current = [];
+    setWalkingRouteCoords([]);
+
+    if (currentUserLocation) {
+      void fetchNearbyAlerts(currentUserLocation.latitude, currentUserLocation.longitude);
+    }
+
+    void handleCenterMapPress();
+  }, [currentUserLocation, fetchNearbyAlerts, handleCenterMapPress, suppressPromptsForRouteAlerts]);
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -1125,7 +1256,7 @@ export default function Map() {
 
   return (
     <View style={styles.container}>
-      {inAppVotePrompt && (
+      {inAppVotePrompt && walkingRouteCoords.length <= 1 && !isPromptSuppressed && (
         <View style={styles.inAppPromptContainer} pointerEvents="box-none">
           <View style={styles.inAppPromptCard}>
             <Text style={styles.inAppPromptTitle}>Is this alert still there?</Text>
@@ -1171,13 +1302,20 @@ export default function Map() {
           <Marker
             key={`${report.id}-${report.timestamp}-${report.latitude}-${report.longitude}`}
             coordinate={{ latitude: report.latitude, longitude: report.longitude }}
-            image={PIN_ICONS[report.type] || PIN_ICONS['Fire']}
             anchor={{ x: 0.5, y: 1 }}
             onPress={(e) => {
               e.stopPropagation();
               handlePresentDetailsModalPress(report);
             }}
-          />
+          >
+            <View style={styles.markerContainer}>
+              <Image
+                source={PIN_ICONS[report.type] || PIN_ICONS['Fire']}
+                style={styles.markerIcon}
+                resizeMode="contain"
+              />
+            </View>
+          </Marker>
         ))}
       </MapView>
 
@@ -1201,6 +1339,20 @@ export default function Map() {
             <MaterialCommunityIcons name="crosshairs-gps" size={34} color="#ffffff" />
           </TouchableOpacity>
         </Animated.View>
+      )}
+
+      {walkingRouteCoords.length > 1 && (
+        <View
+          style={[
+            styles.clearRouteButtonContainer,
+            { top: insets.top ? insets.top + 10 : 20 },
+          ]}
+          pointerEvents="box-none"
+        >
+          <TouchableOpacity style={styles.clearRouteButton} onPress={handleClearSelectedRoute}>
+            <MaterialCommunityIcons name="close" size={26} color="#ffffff" />
+          </TouchableOpacity>
+        </View>
       )}
 
       <KeyboardAvoidingView 
@@ -1465,6 +1617,23 @@ const styles = StyleSheet.create({
     shadowRadius: 14,
     elevation: 14,
   },
+  clearRouteButtonContainer: {
+    position: 'absolute',
+    right: 20,
+  },
+  clearRouteButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(210, 47, 47, 0.96)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
   searchButtonContainer: {
     position: 'absolute',
     left: 18,
@@ -1584,8 +1753,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   markerIcon: {
-    width: 40,
-    height: 40,
+    width: 20,
+    height: 20,
   },
   bottomSheetDetails: {
     backgroundColor: '#fff',
