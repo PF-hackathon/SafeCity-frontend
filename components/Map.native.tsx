@@ -1,5 +1,5 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState, Platform, KeyboardAvoidingView } from 'react-native';
-import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState, Platform, KeyboardAvoidingView, Keyboard } from 'react-native';
+import MapView, { PROVIDER_GOOGLE, Region, Marker, Polyline } from 'react-native-maps';
 
 const ALERTS = [
   { id: 'Theft', label: 'Theft', icon: require('@/assets/alert-icons/Theft.png') },
@@ -37,9 +37,76 @@ const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
   5: 'Fire',
 };
 
+const EARTH_RADIUS_KM = 6371;
+const SEARCH_RADIUS_KM = 20;
+
+const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+
+const getDistanceKm = (
+  fromLatitude: number,
+  fromLongitude: number,
+  toLatitude: number,
+  toLongitude: number,
+) => {
+  const latDistance = toRadians(toLatitude - fromLatitude);
+  const lonDistance = toRadians(toLongitude - fromLongitude);
+  const fromLatInRadians = toRadians(fromLatitude);
+  const toLatInRadians = toRadians(toLatitude);
+
+  const a =
+    Math.sin(latDistance / 2) * Math.sin(latDistance / 2) +
+    Math.sin(lonDistance / 2) * Math.sin(lonDistance / 2) *
+      Math.cos(fromLatInRadians) * Math.cos(toLatInRadians);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_KM * c;
+};
+
+const decodePolyline = (encodedPolyline: string) => {
+  const coordinates: { latitude: number; longitude: number }[] = [];
+  let index = 0;
+  let latitude = 0;
+  let longitude = 0;
+
+  while (index < encodedPolyline.length) {
+    let result = 0;
+    let shift = 0;
+    let byteValue;
+
+    do {
+      byteValue = encodedPolyline.charCodeAt(index++) - 63;
+      result |= (byteValue & 0x1f) << shift;
+      shift += 5;
+    } while (byteValue >= 0x20);
+
+    const deltaLatitude = result & 1 ? ~(result >> 1) : result >> 1;
+    latitude += deltaLatitude;
+
+    result = 0;
+    shift = 0;
+
+    do {
+      byteValue = encodedPolyline.charCodeAt(index++) - 63;
+      result |= (byteValue & 0x1f) << shift;
+      shift += 5;
+    } while (byteValue >= 0x20);
+
+    const deltaLongitude = result & 1 ? ~(result >> 1) : result >> 1;
+    longitude += deltaLongitude;
+
+    coordinates.push({
+      latitude: latitude / 1e5,
+      longitude: longitude / 1e5,
+    });
+  }
+
+  return coordinates;
+};
+
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { BottomSheetModal, BottomSheetView, BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -177,6 +244,14 @@ Notifications.setNotificationHandler({
 });
 
 export default function Map() {
+  type SearchSuggestion = {
+    id: string;
+    label: string;
+    subtitle: string;
+    latitude: number;
+    longitude: number;
+  };
+
   const { colorScheme } = useThemeContext();
   const isDark = colorScheme === 'dark';
   const { width: windowWidth } = useWindowDimensions();
@@ -189,10 +264,17 @@ export default function Map() {
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [showFloatingButtons, setShowFloatingButtons] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchSuggestions, setSearchSuggestions] = useState<SearchSuggestion[]>([]);
+  const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [currentUserLocation, setCurrentUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [walkingRouteCoords, setWalkingRouteCoords] = useState<{ latitude: number; longitude: number }[]>([]);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [inAppVotePrompt, setInAppVotePrompt] = useState<{ id: string; type: string } | null>(null);
   const [inAppVoteQueue, setInAppVoteQueue] = useState<Array<{ id: string; type: string }>>([]);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
   const searchInputRef = useRef<TextInput>(null);
+  const searchAbortControllerRef = useRef<AbortController | null>(null);
 
   const [reports, setReports] = useState<{ id: string; type: string; latitude: number; longitude: number; timestamp: number; creatorSessionId?: string }[]>([]);
   const [pendingLocation, setPendingLocation] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -352,6 +434,26 @@ export default function Map() {
   }, []);
 
   useEffect(() => {
+    const keyboardShowEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const keyboardHideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const onShow = Keyboard.addListener(keyboardShowEvent, (event) => {
+      const keyboardHeight = event.endCoordinates?.height ?? 0;
+      // Keep a small spacing between the search bar and keyboard.
+      setKeyboardOffset(Math.max(0, keyboardHeight - 14));
+    });
+
+    const onHide = Keyboard.addListener(keyboardHideEvent, () => {
+      setKeyboardOffset(0);
+    });
+
+    return () => {
+      onShow.remove();
+      onHide.remove();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!initialAlerts.length) {
       return;
     }
@@ -457,7 +559,7 @@ export default function Map() {
   }, [sendLocation]);
 
 
-  const fetchNearbyAlerts = async (lat: number, lon: number) => {
+  const fetchNearbyAlerts = useCallback(async (lat: number, lon: number) => {
     try {
       const response = await fetch(`${API_BASE_URL}/alerts/nearby?latitude=${lat}&longitude=${lon}`);
       if (response.ok) {
@@ -468,7 +570,7 @@ export default function Map() {
     } catch (error) {
       console.error('Error fetching alerts:', error);
     }
-  };
+  }, [toReport, dedupeReports]);
 
   const handleReportPress = async () => {
     try {
@@ -615,6 +717,10 @@ export default function Map() {
 
       try {
         let location = await Location.getCurrentPositionAsync({});
+        setCurrentUserLocation({
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+        });
         setRegion({
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
@@ -636,12 +742,12 @@ export default function Map() {
         pushLocationUpdate(42.6977, 23.3219);
       }
     })();
-  }, [pushLocationUpdate]);
+  }, [pushLocationUpdate, fetchNearbyAlerts]);
 
   const handleRegionChangeComplete = useCallback((r: Region) => {
     fetchNearbyAlerts(r.latitude, r.longitude);
     pushLocationUpdate(r.latitude, r.longitude);
-  }, [pushLocationUpdate]);
+  }, [pushLocationUpdate, fetchNearbyAlerts]);
 
   const stopFollowingUser = useCallback(() => {
     if (!isFollowingUser) {
@@ -679,6 +785,10 @@ export default function Map() {
             };
 
             setRegion(nextRegion);
+            setCurrentUserLocation({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            });
             mapRef.current?.animateToRegion(nextRegion, 500);
             pushLocationUpdate(nextRegion.latitude, nextRegion.longitude);
           }
@@ -715,6 +825,10 @@ export default function Map() {
         longitudeDelta: 0.005,
       };
 
+      setCurrentUserLocation({
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+      });
       setRegion(nextRegion);
       mapRef.current?.animateToRegion(nextRegion, 450);
     } catch {
@@ -758,17 +872,216 @@ export default function Map() {
   const handleSearchToggle = useCallback(() => {
     setIsSearchExpanded(prev => {
       const next = !prev;
+
+      if (!next) {
+        setShowSuggestions(false);
+      }
+
       animateSearchState(next);
       return next;
     });
   }, [animateSearchState]);
 
   const handleMapPress = useCallback(() => {
+    if (showSuggestions) {
+      setShowSuggestions(false);
+      Keyboard.dismiss();
+    }
+
     if (isSearchExpanded) {
       setIsSearchExpanded(false);
       animateSearchState(false);
     }
-  }, [isSearchExpanded, animateSearchState]);
+  }, [isSearchExpanded, animateSearchState, showSuggestions]);
+
+  const handleBuildWalkingRoute = useCallback(async (destinationLatitude: number, destinationLongitude: number) => {
+    const routeOrigin = currentUserLocation ?? (region
+      ? { latitude: region.latitude, longitude: region.longitude }
+      : null);
+
+    if (!routeOrigin) {
+      console.warn('Cannot build route: current user location is not available yet.');
+      return;
+    }
+
+    const googleApiKey =
+      process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ||
+      Constants.expoConfig?.android?.config?.googleMaps?.apiKey ||
+      null;
+
+    if (!googleApiKey) {
+      console.warn('Cannot build route: missing Google Maps API key. Set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY.');
+      return;
+    }
+
+    try {
+      const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': googleApiKey,
+          'X-Goog-FieldMask': 'routes.polyline.encodedPolyline,routes.distanceMeters,routes.duration',
+        },
+        body: JSON.stringify({
+          origin: {
+            location: {
+              latLng: {
+                latitude: routeOrigin.latitude,
+                longitude: routeOrigin.longitude,
+              },
+            },
+          },
+          destination: {
+            location: {
+              latLng: {
+                latitude: destinationLatitude,
+                longitude: destinationLongitude,
+              },
+            },
+          },
+          travelMode: 'WALK',
+          computeAlternativeRoutes: false,
+          units: 'METRIC',
+          languageCode: 'en-US',
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Routes API failed (${response.status}): ${errorBody}`);
+      }
+
+      const result = await response.json();
+      const encodedPolyline = result?.routes?.[0]?.polyline?.encodedPolyline;
+
+      if (!encodedPolyline || typeof encodedPolyline !== 'string') {
+        setWalkingRouteCoords([]);
+        return;
+      }
+
+      const decodedRoute = decodePolyline(encodedPolyline);
+      setWalkingRouteCoords(decodedRoute);
+
+      if (decodedRoute.length > 1) {
+        mapRef.current?.fitToCoordinates(decodedRoute, {
+          edgePadding: { top: 110, right: 60, bottom: 180, left: 60 },
+          animated: true,
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to compute walking route', error);
+      setWalkingRouteCoords([]);
+    }
+  }, [currentUserLocation, region]);
+
+  const handleSuggestionSelect = useCallback((suggestion: SearchSuggestion) => {
+    const nextRegion: Region = {
+      latitude: suggestion.latitude,
+      longitude: suggestion.longitude,
+      latitudeDelta: 0.008,
+      longitudeDelta: 0.008,
+    };
+
+    setIsSearchExpanded(false);
+    animateSearchState(false);
+    Keyboard.dismiss();
+    setSearchQuery(suggestion.label);
+    setShowSuggestions(false);
+    setRegion(nextRegion);
+    mapRef.current?.animateToRegion(nextRegion, 450);
+    void handleBuildWalkingRoute(nextRegion.latitude, nextRegion.longitude);
+    fetchNearbyAlerts(nextRegion.latitude, nextRegion.longitude);
+    pushLocationUpdate(nextRegion.latitude, nextRegion.longitude);
+  }, [pushLocationUpdate, fetchNearbyAlerts, handleBuildWalkingRoute, animateSearchState]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+
+    if (!isSearchExpanded || query.length < 2) {
+      searchAbortControllerRef.current?.abort();
+      setIsLoadingSuggestions(false);
+      setSearchSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    if (!currentUserLocation) {
+      setIsLoadingSuggestions(false);
+      setSearchSuggestions([]);
+      setShowSuggestions(true);
+      return;
+    }
+
+    setIsLoadingSuggestions(true);
+    setShowSuggestions(true);
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        searchAbortControllerRef.current?.abort();
+        const controller = new AbortController();
+        searchAbortControllerRef.current = controller;
+
+        const response = await fetch(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=10&lang=en&lat=${currentUserLocation.latitude}&lon=${currentUserLocation.longitude}`,
+          {
+            signal: controller.signal,
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`Suggestion request failed with status ${response.status}`);
+        }
+
+        const results = await response.json();
+        const mappedSuggestions = (Array.isArray(results?.features) ? results.features : [])
+          .map((feature: any) => {
+            const name = typeof feature?.properties?.name === 'string' ? feature.properties.name : query;
+            const city = typeof feature?.properties?.city === 'string' ? feature.properties.city : '';
+            const country = typeof feature?.properties?.country === 'string' ? feature.properties.country : '';
+            const subtitle = [city, country].filter(Boolean).join(', ');
+            const coordinates = Array.isArray(feature?.geometry?.coordinates) ? feature.geometry.coordinates : [];
+
+            return {
+              id: String(feature?.properties?.osm_id ?? `${name}-${coordinates[1]}-${coordinates[0]}`),
+              label: name,
+              subtitle,
+              latitude: Number(coordinates[1]),
+              longitude: Number(coordinates[0]),
+            };
+          })
+          .filter((item: SearchSuggestion) => Number.isFinite(item.latitude) && Number.isFinite(item.longitude))
+          .filter((item: SearchSuggestion) => {
+            const distanceKm = getDistanceKm(
+              currentUserLocation.latitude,
+              currentUserLocation.longitude,
+              item.latitude,
+              item.longitude,
+            );
+
+            return distanceKm <= SEARCH_RADIUS_KM;
+          });
+
+        setSearchSuggestions(mappedSuggestions);
+      } catch (error: any) {
+        if (error?.name !== 'AbortError') {
+          console.warn('Failed to load search suggestions', error);
+          setSearchSuggestions([]);
+        }
+      } finally {
+        setIsLoadingSuggestions(false);
+      }
+    }, 300);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [searchQuery, isSearchExpanded, currentUserLocation]);
+
+  useEffect(() => {
+    return () => {
+      searchAbortControllerRef.current?.abort();
+    };
+  }, []);
 
   const expandedSearchWidth = Math.max(58, windowWidth - 36);
 
@@ -836,6 +1149,14 @@ export default function Map() {
         onPress={handleMapPress}
         onRegionChangeComplete={handleMapRegionChangeComplete}
       >
+        {walkingRouteCoords.length > 1 && (
+          <Polyline
+            coordinates={walkingRouteCoords}
+            strokeColor={isDark ? '#6dc6ff' : '#0f6bdc'}
+            strokeWidth={5}
+          />
+        )}
+
         {reports.map((report) => (
           <Marker
             key={`${report.id}-${report.timestamp}-${report.latitude}-${report.longitude}`}
@@ -874,7 +1195,7 @@ export default function Map() {
 
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.searchButtonContainer}
+        style={[styles.searchButtonContainer, { bottom: 28 + keyboardOffset }]}
         pointerEvents="box-none"
       >
         <Animated.View style={[styles.searchButtonShell, { width: searchContainerWidth }]}>
@@ -885,14 +1206,56 @@ export default function Map() {
             <TextInput
               ref={searchInputRef}
               value={searchQuery}
-              onChangeText={setSearchQuery}
+              onChangeText={(text) => {
+                setSearchQuery(text);
+                if (!showSuggestions) {
+                  setShowSuggestions(true);
+                }
+              }}
               style={styles.searchInput}
               placeholder="Search"
               placeholderTextColor="rgba(255,255,255,0.72)"
               returnKeyType="search"
+              onFocus={() => {
+                if (searchQuery.trim().length >= 2) {
+                  setShowSuggestions(true);
+                }
+              }}
+              onSubmitEditing={() => {
+                if (searchSuggestions.length > 0) {
+                  handleSuggestionSelect(searchSuggestions[0]);
+                }
+              }}
             />
           </Animated.View>
         </Animated.View>
+
+        {showSuggestions && (isLoadingSuggestions || searchSuggestions.length > 0 || searchQuery.trim().length >= 2) && (
+          <Animated.View style={[styles.searchSuggestionsContainer, { width: searchContainerWidth }]}>
+            {isLoadingSuggestions ? (
+              <View style={styles.searchSuggestionItem}>
+                <Text style={styles.searchSuggestionTitle}>Searching...</Text>
+              </View>
+            ) : searchSuggestions.length === 0 ? (
+              <View style={styles.searchSuggestionItem}>
+                <Text style={styles.searchSuggestionTitle}>No places found</Text>
+              </View>
+            ) : (
+              searchSuggestions.map((suggestion) => (
+                <TouchableOpacity
+                  key={suggestion.id}
+                  style={styles.searchSuggestionItem}
+                  onPress={() => handleSuggestionSelect(suggestion)}
+                >
+                  <Text numberOfLines={1} style={styles.searchSuggestionTitle}>{suggestion.label}</Text>
+                  {!!suggestion.subtitle && (
+                    <Text numberOfLines={1} style={styles.searchSuggestionSubtitle}>{suggestion.subtitle}</Text>
+                  )}
+                </TouchableOpacity>
+              ))
+            )}
+          </Animated.View>
+        )}
       </KeyboardAvoidingView>
 
       {/* Report Bottom Sheet Modal */}
@@ -1121,6 +1484,32 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     paddingVertical: 0,
+  },
+  searchSuggestionsContainer: {
+    position: 'absolute',
+    left: 0,
+    bottom: 66,
+    borderRadius: 16,
+    backgroundColor: 'rgba(25, 30, 38, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+    overflow: 'hidden',
+  },
+  searchSuggestionItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.12)',
+  },
+  searchSuggestionTitle: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  searchSuggestionSubtitle: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    marginTop: 2,
   },
   bottomSheetContentContainer: {
     flex: 1,
