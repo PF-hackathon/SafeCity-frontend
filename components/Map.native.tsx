@@ -43,6 +43,7 @@ const TYPE_ID_TO_ALERT_ID: Record<number, string> = {
 const EARTH_RADIUS_KM = 6371;
 const SEARCH_RADIUS_KM = 20;
 const ROUTE_ALERT_MAX_POINTS = 40;
+const MAP_MARKER_ICON_SIZE = 14;
 
 const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
 
@@ -1753,8 +1754,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   markerIcon: {
-    width: 20,
-    height: 20,
+    width: MAP_MARKER_ICON_SIZE,
+    height: MAP_MARKER_ICON_SIZE,
   },
   bottomSheetDetails: {
     backgroundColor: '#fff',
