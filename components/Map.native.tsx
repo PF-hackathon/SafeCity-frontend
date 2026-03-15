@@ -1,4 +1,4 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
@@ -10,14 +10,15 @@ const ALERTS = [
 ];
 
 const PIN_ICONS: Record<string, any> = {
-  'Bad Infrastructure': require('@/assets/pin-icons/Bad Infrastructure Pin Icon.png'),
-  'Fire': require('@/assets/pin-icons/Fire Pin Icon.png'),
-  'Harm': require('@/assets/pin-icons/Harm Pin Icon.png'),
-  'Theft': require('@/assets/pin-icons/Theft Pin Icon.png'),
-  'Dark Area': require('@/assets/pin-icons/Dark Area Pin Icon.png'),
+  'Bad Infrastructure': require('@/assets/pin-icons/Bad Infrastructure Pin Icon Large.png'),
+  'Fire': require('@/assets/pin-icons/Fire Pin Icon Large.png'),
+  'Harm': require('@/assets/pin-icons/Harm Pin Icon Large.png'),
+  'Theft': require('@/assets/pin-icons/Theft Pin Icon Large.png'),
+  'Dark Area': require('@/assets/pin-icons/Dark Area Pin Icon Large.png'),
 };
 
-const API_BASE_URL = 'http://10.108.5.101:8080/api/v1';
+const API_HOST_URL = 'http://10.108.5.101:8080';
+const API_BASE_URL = `${API_HOST_URL}/api/v1`;
 const SESSION_ID = Math.random().toString(36).substring(2, 15);
 
 const ALERT_ID_TO_TYPE_ID: Record<string, number> = {
@@ -57,11 +58,14 @@ export default function Map() {
   const { width: windowWidth } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
   const followSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
+  const appStateRef = useRef(AppState.currentState);
+  const promptedAlertIdsRef = useRef<Set<string>>(new Set());
   const [region, setRegion] = useState<Region | null>(null);
   const [isFollowingUser, setIsFollowingUser] = useState(false);
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [showFloatingButtons, setShowFloatingButtons] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [inAppVotePrompt, setInAppVotePrompt] = useState<{ id: string; type: string } | null>(null);
   const searchWidthAnim = useRef(new Animated.Value(0)).current;
   const searchInputRef = useRef<TextInput>(null);
 
@@ -127,6 +131,7 @@ export default function Map() {
 
   const handleNotificationResponse = async (
     response: 'still_there' | 'not_there',
+    alertId?: string,
     notificationId?: string
   ) => {
     console.log('User responded to OS notification:', response);
@@ -140,19 +145,78 @@ export default function Map() {
       }
     }
 
-    // Here you will eventually emit a WebSocket message
+    if (!alertId) {
+      return;
+    }
+
+    const vote = response === 'still_there' ? 'STILL_THERE' : 'NOT_THERE';
+
+    try {
+      const responseVote = await fetch(`${API_BASE_URL}/alerts/${encodeURIComponent(alertId)}/vote`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-Id': SESSION_ID,
+        },
+        body: JSON.stringify({ vote }),
+      });
+
+      if (!responseVote.ok) {
+        console.error('Failed to send vote', await responseVote.text());
+      }
+    } catch (error) {
+      console.error('Error sending vote:', error);
+    }
   };
+
+  const showInAppVotePrompt = useCallback((report: { id: string; type: string }) => {
+    setInAppVotePrompt(report);
+  }, []);
+
+  const handleInAppVote = useCallback((vote: 'still_there' | 'not_there') => {
+    if (!inAppVotePrompt) {
+      return;
+    }
+
+    const alertId = inAppVotePrompt.id;
+    setInAppVotePrompt(null);
+    void handleNotificationResponse(vote, alertId);
+  }, [inAppVotePrompt]);
+
+  const showBackgroundVoteNotification = useCallback(async (report: { id: string; type: string }) => {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Alert nearby',
+        body: `Is ${report.type} still there?`,
+        categoryIdentifier: 'alert_proximity',
+        data: { alertId: report.id },
+      },
+      trigger: null,
+    });
+  }, []);
 
   useEffect(() => {
     const subscription = Notifications.addNotificationResponseReceivedListener(response => {
       const actionIdentifier = response.actionIdentifier;
       const notificationId = response.notification.request.identifier;
+      const alertIdValue = response.notification.request.content.data?.alertId;
+      const alertId = typeof alertIdValue === 'number' ? alertIdValue.toString() : typeof alertIdValue === 'string' ? alertIdValue : undefined;
 
       if (actionIdentifier === 'still_there' || actionIdentifier === 'not_there') {
-        void handleNotificationResponse(actionIdentifier, notificationId);
+        void handleNotificationResponse(actionIdentifier, alertId, notificationId);
       }
     });
     return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -193,6 +257,25 @@ export default function Map() {
       return dedupeReports([...prev, incomingReport]);
     });
   }, [newAlert, toReport, dedupeReports]);
+
+  useEffect(() => {
+    const unseenReports = reports.filter((report) => !promptedAlertIdsRef.current.has(report.id));
+    if (!unseenReports.length) {
+      return;
+    }
+
+    if (appStateRef.current === 'active') {
+      const report = unseenReports[0];
+      promptedAlertIdsRef.current.add(report.id);
+      showInAppVotePrompt(report);
+      return;
+    }
+
+    unseenReports.forEach((report) => {
+      promptedAlertIdsRef.current.add(report.id);
+      void showBackgroundVoteNotification(report);
+    });
+  }, [reports, showBackgroundVoteNotification, showInAppVotePrompt]);
 
   const pushLocationUpdate = useCallback((latitude: number, longitude: number) => {
     const now = Date.now();
@@ -546,6 +629,23 @@ export default function Map() {
 
   return (
     <View style={styles.container}>
+      {inAppVotePrompt && (
+        <View style={styles.inAppPromptContainer} pointerEvents="box-none">
+          <View style={styles.inAppPromptCard}>
+            <Text style={styles.inAppPromptTitle}>Is this alert still there?</Text>
+            <Text style={styles.inAppPromptBody}>{inAppVotePrompt.type} reported nearby.</Text>
+            <View style={styles.inAppPromptActions}>
+              <TouchableOpacity style={styles.inAppPromptSecondaryButton} onPress={() => handleInAppVote('not_there')}>
+                <Text style={styles.inAppPromptSecondaryText}>Not there</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.inAppPromptPrimaryButton} onPress={() => handleInAppVote('still_there')}>
+                <Text style={styles.inAppPromptPrimaryText}>Still there</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
       <MapView
         ref={mapRef}
         provider={PROVIDER_GOOGLE}
@@ -553,7 +653,8 @@ export default function Map() {
         initialRegion={region}
         showsUserLocation
         showsMyLocationButton={false}
-        followsUserLocation={isFollowingUser}
+        followsUserLocation={false}
+        toolbarEnabled={false}
         onPanDrag={handleMapPanDrag}
         onPress={handleMapPress}
         onRegionChangeComplete={handleMapRegionChangeComplete}
@@ -562,19 +663,13 @@ export default function Map() {
           <Marker
             key={`${report.id}-${report.timestamp}-${report.latitude}-${report.longitude}`}
             coordinate={{ latitude: report.latitude, longitude: report.longitude }}
+            image={PIN_ICONS[report.type] || PIN_ICONS['Fire']}
+            anchor={{ x: 0.5, y: 1 }}
             onPress={(e) => {
               e.stopPropagation();
               handlePresentDetailsModalPress(report);
             }}
-          >
-            <View style={{ width: 48, height: 48, justifyContent: 'center', alignItems: 'center', overflow: 'visible' }}>
-              <Image
-                source={PIN_ICONS[report.type] || PIN_ICONS['Fire']}
-                style={{ width: 24, height: 24 }}
-                resizeMode="contain"
-              />
-            </View>
-          </Marker>
+          />
         ))}
       </MapView>
 
@@ -701,6 +796,60 @@ export default function Map() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  inAppPromptContainer: {
+    position: 'absolute',
+    top: 56,
+    left: 14,
+    right: 14,
+    zIndex: 30,
+  },
+  inAppPromptCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  inAppPromptTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111',
+  },
+  inAppPromptBody: {
+    marginTop: 4,
+    fontSize: 14,
+    color: '#424242',
+  },
+  inAppPromptActions: {
+    marginTop: 12,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  inAppPromptPrimaryButton: {
+    backgroundColor: 'rgba(2, 136, 209, 0.95)',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+  },
+  inAppPromptPrimaryText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  inAppPromptSecondaryButton: {
+    backgroundColor: '#eeeeee',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+  },
+  inAppPromptSecondaryText: {
+    color: '#212121',
+    fontWeight: '600',
   },
   map: {
     ...StyleSheet.absoluteFillObject,
