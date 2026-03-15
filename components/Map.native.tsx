@@ -1,4 +1,4 @@
-import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState, Platform } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, TouchableOpacity, Text, Image, Animated, TextInput, useWindowDimensions, AppState, Platform, KeyboardAvoidingView } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Region, Marker } from 'react-native-maps';
 
 const ALERTS = [
@@ -746,7 +746,11 @@ export default function Map() {
         </Animated.View>
       )}
 
-      <View style={styles.searchButtonContainer}>
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.searchButtonContainer}
+        pointerEvents="box-none"
+      >
         <Animated.View style={[styles.searchButtonShell, { width: searchContainerWidth }]}>
           <TouchableOpacity style={styles.searchIconButton} onPress={handleSearchToggle}>
             <MaterialCommunityIcons name="magnify" size={28} color="#ffffff" />
@@ -763,7 +767,7 @@ export default function Map() {
             />
           </Animated.View>
         </Animated.View>
-      </View>
+      </KeyboardAvoidingView>
 
       {/* Report Bottom Sheet Modal */}
       <BottomSheetModal
